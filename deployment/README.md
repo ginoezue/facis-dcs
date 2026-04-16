@@ -6,162 +6,165 @@ An automated orchestration workspace that deploys a [Digital Contracting Service
 
 ---
 
-## 🚀 Overview
+## Overview
 
 The Digital Contracting Service (DCS) provides an open-source platform for creating, signing, and managing contracts digitally.
 Integrated with the European Digital Identity Wallet (EUDI), it guarantees that all digital transactions are secure, legally binding, and interoperable.
-DCS allows organizations to streamline business processes, reduce paperwork, and ensure compliance with eIDAS 2.0 regulations, while fostering trust across federated partners.
 
-Key components of the Digital Contracting Service include:
-- Multi-Contract Signing: Enables multi-party contract execution within a single integrated workflow.
-- Automated Workflows: Automates contract generation, execution, and deployment to ensure legal
-consistency and efficiency.
-- Lifecycle Management: Monitors contracts with alerts for renewals, expirations, or required actions.
-- Signature Management: Links contract signatures to verifiable digital identities to maintain legal validity
-and trust.
-- Secure Archiving: Stores signed contracts in a tamper-evident archive compliant with retention policies.
-- Machine Signing: Supports automated signing for high-volume or routine transactions.
-
-This module allows you to set up and interact with the Digital Contracting Service visually inside the ORCE environment. You don’t need to write any code or handle any complex API integration manually—just install the Node-RED node for Digital Contracting Service, drop it into your flow, and configure the endpoint and query.
-
-Thanks to ORCE’s orchestration features, deploying a Digital Contracting Service instance and querying it happens in just a few clicks. Upload your configs, drag your node, and start the Digital Contracting Service
+Key components:
+- **Multi-Contract Signing** — multi-party contract execution within a single workflow
+- **Automated Workflows** — contract generation, execution, and deployment
+- **Lifecycle Management** — contract monitoring with renewal/expiration alerts
+- **Signature Management** — signatures linked to verifiable digital identities
+- **Secure Archiving** — tamper-evident archive compliant with retention policies
+- **Machine Signing** — automated signing for high-volume transactions
 
 ---
 
-## ⚡️ Click-to-Deploy
+## Helm Chart
+
+The parent chart bundles `postgresql`, `keycloak`, `nats`, `neo4j`, and `federated-catalogue` as optional sub-charts, each toggled via `<subchart>.enabled`.
+
+When sub-charts are disabled, point DCS to external services via:
+- `serviceDiscovery.postgresqlHost`
+- `serviceDiscovery.keycloakHost`
+- `serviceDiscovery.natsHost`
+
+Routing is configured with `route.basePath` (e.g. `/tenant-a/dcs`) or explicit `paths.api` / `paths.ui` overrides.
 
 ---
-## 🛠️ How to Use
 
-### 1. Prepare the environment and prerequisites
-You'll need:
-1.1. A Kubernetes cluster to host the child instances
-1.2. A local ORCE as the parent to host the initial developing environment
+## Local Development
 
-### 1.1. Kubernetes
-"Orchestration Engine" node requires a working Kubernetes cluster with ingress installed on it. Initiate a K8s cluster and install nginx-ingress on it using this command.
+### Prerequisites
+- [Rancher Desktop](https://rancherdesktop.io/) with Kubernetes enabled (provides `kubectl`, `helm`, and NodePort forwarding to `localhost`)
+- Go with [air](https://github.com/air-verse/air) (`go install github.com/air-verse/air@latest`)
+- Node.js 20+
+
+### 1. Deploy dependencies
+
 ```bash
-export KUBECONFIG=`<YOUR KUBECONFIG PATH>`
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.3/deploy/static/provider/cloud/deploy.yaml
+helm dependency build ./deployment/helm
+helm install dcs ./deployment/helm -f ./deployment/helm/values.dev.yml
 ```
-You can learn more by reading the [official documentation](https://kubernetes.github.io/ingress-nginx/deploy/)
-After this step, you can proceed to step 1.2 (Installing a local ORCE)
 
-### 1.2. Local ORCE
-Install ORCE as described in the [ORCE page](https://github.com/eclipse-xfsc/orchestration-engine):
+This starts all dependencies as NodePort services forwarded to `localhost`:
+
+| Service              | Address                          |
+|----------------------|----------------------------------|
+| PostgreSQL           | `localhost:30432`                |
+| Keycloak             | `http://localhost:30080`         |
+| NATS                 | `nats://localhost:30422`         |
+| Neo4j HTTP           | `http://localhost:30474`         |
+| Neo4j Bolt           | `bolt://localhost:30687`         |
+| Federated Catalogue  | `http://localhost:30081`         |
+
+The Keycloak `gaia-x` realm is imported automatically on first start.
+
+> To upgrade after chart changes: `helm upgrade dcs ./deployment/helm -f ./deployment/helm/values.dev.yml`
+
+### 2. Run the backend
+
 ```bash
-docker run -d --name xfsc-orce-instance -p 1880:1880 leanea/facis-xfsc-orce:1.0.16
+cp backend/.env.dev backend/.env
+cd backend && air
 ```
-Go to [http://localhost:1880](http://localhost:1880).
 
-### Install Digital Contracting Service Node
-Click on "New Node" in the sidebar.
+The backend listens on `http://localhost:8991`.
 
-![new button](./docImage/add-new-node.jpg?raw=true)
+### 3. Run the frontend
 
-Upload `node-red-contrib-digital-contracting-service-0.0.1.tgz` from this repository and install. Refresh to activate the node.
+```bash
+cd frontend/ClientApp
+npm install
+npm run dev
+```
 
-
-### 2. Install your node
-click on the "Install" tab. Then on the upload icon.The node will be successfully installed.
-![step two (flow)](./docImage/newstep.png?raw=true)
-
-
-### 3. Create your flow
-Drag in an Inject node, the **Digital Contracting Service** node, and a Debug node. Connect them:
-
-![step three (flow)](./docImage/create-your-flow.png?raw=true)
-
-
-### 4. Name your instance and configure the node
-Double-click on the Digital Contracting Service node to open the edit dialog.
-In this step, you must choose a **Digital Contracting Service Name**. This will become your instance’s unique identifier, so it must be:
-- Unique (not used by any other instance)
-- Free of special characters (letters and numbers only)
-For example, if you name it `mydcs`, it will be used internally for instance referencing and must remain distinct.
-![step four (flow)](./docImage/step2.png?raw=true)
-
-
-### 5. Provide your kubeconfig file
-In this tab, you need to provide the **kubeconfig** file of your target Kubernetes cluster.
-This file allows the DCS node to access your Kubernetes environment and deploy the DCS instance correctly.
-![step five (flow)](./docImage/step3.png?raw=true)
-
-
-### 6. Provide domain address and TLS credentials
-In this tab, you must enter the **domain address** where the DCS will be accessible. You’ll also need to upload your **TLS certificate** and **private key**.
-
-The final accessible URL is formed by combining this domain with the DCS instance name you set earlier. For example:
-- Instance Name: `mydcs`
-- Domain: `example.com`
-- Resulting URL: `example.com/mydcs`
-Make sure your TLS credentials match the provided domain.
-![step six (flow)](./docImage/step4.png?raw=true)
-
-
-### 8. Information tab
-After the service is successfully deployed, you can switch to the **Information** tab.
-Here, the final URL of your deployed catalogue instance will be shown—ready to be copied and used for access or integration.
-Click **Done** and then **Deploy**. Activate the Inject node.
-![step eight (flow)](./docImage/step7.png?raw=true)
-You should see JSON output in the Debug panel, showing catalogue entries.
+The Vite dev server starts at `http://localhost:5173` and proxies `/api` requests to the backend automatically.
 
 ---
 
-## ⚙️ Configuration
+## BDD Tests
 
-Before running:
+BDD scenarios live in `features/` at the project root. Tests are run against a full stack in an ephemeral [kind](https://kind.sigs.k8s.io/) cluster.
 
-1. **DCS URL**  
-   Set the URL of your DCS instance.
+### Prerequisites
+- `kind` — `go install sigs.k8s.io/kind@v0.23.0` or see [kind releases](https://kind.sigs.k8s.io/docs/user/quick-start/#installation)
+- `kubectl` and `helm`
+- Docker (to build the DCS image)
+- Python 3.10+
 
-2. **Query Parameters**  
-   Provide any filters or search strings in the node editor or in `msg.payload`.
+### Run locally
 
-3. **Authorization Token (optional)**  
-   The DCS endpoints require auth headers (Bearer token).
+```bash
+# Build DCS image, spin up kind cluster, deploy via Helm, run all scenarios
+make -C tests/bdd run_bdd_kind_ci
+```
+
+This single command:
+1. Builds the DCS Docker image (`digital-contracting-service:bdd`)
+2. Creates a kind cluster named `dcs-bdd`
+3. Loads the image into the cluster
+4. Deploys the full stack via `deployment/helm` with `values.bdd.yml`
+5. Port-forwards DCS and Keycloak into the cluster network
+6. Runs all `features/**/*.feature` scenarios with behave
+
+Tear down the cluster afterwards:
+```bash
+make -C tests/bdd kind_delete
+```
+
+### Run against an already-deployed Helm release
+
+If you have a release running (e.g. via Rancher Desktop):
+
+```bash
+make -C tests/bdd run_bdd_helm_dev \
+  K8S_NAMESPACE=default \
+  HELM_RELEASE=dcs
+```
+
+### CI
+
+The `bdd-kind.yml` GitHub Actions workflow runs:
+
+```yaml
+make -C tests/bdd run_bdd_kind_ci
+```
+
+JUnit reports are published as check annotations and uploaded as workflow artifacts.
 
 ---
 
-## 📁 Directory Contents
-```
-.
-├── node-red-contrib-digital-contracting-service-0.0.1.tgz
-├── DigitalContractingService.html
-├── DigitalContractingService.js
-├── package.json
-```
+## Production Deployment
 
-- **node-red-contrib-digital-contracting-service-0.0.1.tgz**  
-  Installable node package.
+### Keycloak
+- Use a properly secured external Keycloak instance (not the bundled sub-chart)
+- Configure valid redirect URIs in your client settings:
+  - **Valid Redirect URIs**: `https://<domain>/<path>/api/auth/callback`
+  - **Valid Post Logout Redirect URIs**: `https://<domain>/<path>/api/auth/logout-complete`
+- Enable **Client authentication**, **Standard flow enabled**
 
-- **DigitalContractingService.html**  
-  Node-RED UI form.
+### TLS
+- Use certificates from a trusted Certificate Authority
+- Recommend [cert-manager](https://cert-manager.io/) for automatic renewal
 
-- **DigitalContractingService.js**  
-  Backend logic to send API requests and return results.
+### Values
+Override the following at minimum:
 
-- **package.json**  
-  Metadata and dependencies.
+```yaml
+oidc:
+  issuerURL: "https://keycloak.example.com/realms/gaia-x"
+  clientID: "dcs-client"
+  redirectURI: "https://example.com/dcs/ui/"
+  logoutRedirectURI: "https://example.com/dcs/ui/"
 
----
-
-## 📦 Dependencies
-
-```json
-"node": ">=14.0.0",
-"node-red": ">=3.0.0"
+route:
+  basePath: "/dcs"
 ```
 
 ---
 
-## 🔗 Links & References
+## License
 
-- [Digital Contracting Service - XFSC](https://github.com/eclipse-xfsc/facis/tree/main/DCS)
-
-
----
-
-## 📝 License
-
-This project is licensed under the Apache License 2.0. See the [LICENSE](../LICENSE) file for details.
+Apache License 2.0. See [LICENSE](../LICENSE).
