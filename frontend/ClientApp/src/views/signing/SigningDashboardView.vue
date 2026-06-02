@@ -7,6 +7,7 @@ import {
   type SignatureValidateResult,
   type SignatureVerifyResult,
 } from '@/services/signature-management-service'
+import { contractWorkflowService } from '@/services/contract-workflow-service'
 import { useAuthStore } from '@/stores/auth-store'
 import { onMounted, ref } from 'vue'
 
@@ -22,6 +23,53 @@ const envelopes = ref<Record<string, SignatureEnvelope | undefined>>({})
 const verifyResults = ref<Record<string, SignatureVerifyResult | undefined>>({})
 const validateResults = ref<Record<string, SignatureValidateResult | undefined>>({})
 const complianceResults = ref<Record<string, SignatureComplianceResult | undefined>>({})
+const pdfVerifyResults = ref<
+  Record<
+    string,
+    {
+      lifecycle_status?: string
+      status_list_status?: string
+    } | undefined
+  >
+>({})
+
+// DCS-OR-C2PA-006: derive human-readable C2PA lifecycle banner label and CSS class
+// from the contract state. Returns one of: Active, Draft, Suspended, Terminated,
+// Replaced, Expired, or the raw state as fallback.
+type C2PAStatus = { label: string; cls: string }
+function c2paStatus(contract: SignatureContract): C2PAStatus {
+  const pdfVerify = pdfVerifyResults.value[contract.did]
+  const lifecycle = (pdfVerify?.lifecycle_status ?? '').toLowerCase()
+  const statusList = (pdfVerify?.status_list_status ?? '').toLowerCase()
+  if (statusList === 'revoked') {
+    return { label: 'Suspended', cls: 'badge-warning' }
+  }
+
+  const lifecycleMap: Record<string, C2PAStatus> = {
+    active: { label: 'Active', cls: 'badge-success' },
+    draft: { label: 'Draft', cls: 'badge-ghost' },
+    suspended: { label: 'Suspended', cls: 'badge-warning' },
+    terminated: { label: 'Terminated', cls: 'badge-error' },
+    replaced: { label: 'Replaced', cls: 'badge-neutral' },
+    expired: { label: 'Expired', cls: 'badge-neutral' },
+  }
+  if (lifecycleMap[lifecycle]) {
+    return lifecycleMap[lifecycle]
+  }
+
+  const state = (contract.state ?? '').toLowerCase()
+  const map: Record<string, C2PAStatus> = {
+    active:     { label: 'Active',     cls: 'badge-success' },
+    approved:   { label: 'Active',     cls: 'badge-success' },
+    draft:      { label: 'Draft',      cls: 'badge-ghost' },
+    suspended:  { label: 'Suspended',  cls: 'badge-warning' },
+    terminated: { label: 'Terminated', cls: 'badge-error' },
+    replaced:   { label: 'Replaced',   cls: 'badge-neutral' },
+    expired:    { label: 'Expired',    cls: 'badge-neutral' },
+    amended:    { label: 'Active',     cls: 'badge-success' },
+  }
+  return map[state] ?? { label: contract.state ?? 'Unknown', cls: 'badge-ghost' }
+}
 
 onMounted(async () => {
   loading.value = true
@@ -52,6 +100,7 @@ async function verify(contract: SignatureContract) {
     verifyResults.value[contract.did] = await signatureManagementService.verifySignature(
       contract.did,
     )
+    pdfVerifyResults.value[contract.did] = await contractWorkflowService.verifyPdf(contract.did)
   } catch (e) {
     error.value = `Failed to verify contract ${contract.did}: ${e}`
   }
@@ -100,6 +149,7 @@ async function compliance(contract: SignatureContract) {
             <th>Name</th>
             <th>Version</th>
             <th>Updated</th>
+            <th>C2PA Status</th>
             <th>Signature</th>
             <th>Actions</th>
           </tr>
@@ -110,6 +160,12 @@ async function compliance(contract: SignatureContract) {
             <td>{{ contract.name ?? '—' }}</td>
             <td>{{ contract.contract_version ?? 1 }}</td>
             <td>{{ new Date(contract.updated_at).toLocaleDateString() }}</td>
+            <!-- DCS-OR-C2PA-006: C2PA lifecycle status banner -->
+            <td>
+              <span :class="['badge', 'badge-sm', c2paStatus(contract).cls]">
+                {{ c2paStatus(contract).label }}
+              </span>
+            </td>
             <td>
               <span
                 v-if="envelopes[contract.did]"
@@ -129,6 +185,9 @@ async function compliance(contract: SignatureContract) {
               >
                 MR/HR: {{ verifyResults[contract.did]?.match ? 'match ✓' : 'mismatch ✗' }}
                 ({{ verifyResults[contract.did]?.sig_count }} sig(s))
+              </div>
+              <div v-if="verifyResults[contract.did]?.findings?.length" class="text-xs mt-1">
+                Verify: {{ verifyResults[contract.did]?.findings?.[0] }}
               </div>
 
               <div v-if="validateResults[contract.did]?.findings?.length" class="text-xs mt-1">

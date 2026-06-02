@@ -8,6 +8,7 @@ package verify
 import (
 	"bytes"
 	"crypto/sha256"
+	"digital-contracting-service/internal/pdfgeneration/c2pa"
 	"encoding/hex"
 	"fmt"
 )
@@ -25,6 +26,35 @@ type Result struct {
 	// StoredBasePDFHash is the SHA-256 of the base layer of the stored PDF (before
 	// any C2PA incremental updates).
 	StoredBasePDFHash string `json:"stored_base_pdf_hash"`
+	// ManifestSource indicates where C2PA provenance was verified from.
+	// "embedded" — manifest present in the supplied PDF bytes.
+	// "remote"   — manifest absent; canonical PDF fetched via FetchFn (DCS-OR-C2PA-008).
+	// "none"     — no manifest found and FetchFn unavailable or returned no data.
+	ManifestSource string `json:"manifest_source"`
+	// C2PAManifestFound is true when a C2PA JUMBF manifest was detected in the PDF (DCS-OR-C2PA-006).
+	C2PAManifestFound bool `json:"c2pa_manifest_found"`
+	// C2PASignatureValid is true when the COSE_Sign1 signature in the manifest is
+	// cryptographically valid (DCS-OR-C2PA-006).
+	C2PASignatureValid bool `json:"c2pa_signature_valid"`
+	// VCProofValid is true when the embedded W3C VC Ed25519Signature2020 proof is
+	// cryptographically valid (DCS-OR-C2PA-006).
+	VCProofValid bool `json:"vc_proof_valid"`
+	// StatusListURI is the URI of the status list service queried for revocation check.
+	StatusListURI string `json:"status_list_uri,omitempty"`
+	// LifecycleStatus is the contract state recorded in the latest C2PA lifecycle
+	// assertion (draft, active, amended, suspended, terminated, expired, replaced).
+	// This is the value the SRS requires shown as a verification banner (DCS-OR-C2PA-006).
+	LifecycleStatus string `json:"lifecycle_status,omitempty"`
+	// StatusListStatus is the live revocation state queried from the XFSC status list
+	// service at the URI embedded in the VC's credentialStatus field (DCS-OR-C2PA-006).
+	// "active" or "revoked"; empty when no status list URI was found or CheckStatusFn is nil.
+	StatusListStatus string `json:"status_list_status,omitempty"`
+	// PDFSignatureCount is the number of detached PDF signatures found via
+	// /ByteRange entries.
+	PDFSignatureCount int `json:"pdf_signature_count,omitempty"`
+	// PDFSignatureValid is true when all detected PDF signatures verify
+	// cryptographically as PKCS#7 detached signatures.
+	PDFSignatureValid bool `json:"pdf_signature_valid"`
 }
 
 // ContractVerifier holds the dependencies needed to re-render a contract PDF.
@@ -32,28 +62,122 @@ type ContractVerifier struct {
 	// BuildFn re-renders a PDF from the given JSON-LD bytes.
 	// Injected so tests can provide a stub.
 	BuildFn func(jsonld []byte) ([]byte, error)
+
+	// FetchFn, when set, is called to retrieve the canonical full PDF (with C2PA
+	// incremental updates attached) when the input PDF has no incremental updates.
+	// This implements the DCS-OR-C2PA-008 remote manifest fallback: the verifier
+	// fetches from IPFS if the embedded manifest has been stripped.
+	FetchFn func() ([]byte, error)
+
+	// FetchManifestFn, when set, retrieves the standalone remote C2PA manifest
+	// bytes (JUMBF). This is the primary remote-manifest retrieval path required
+	// by DCS-OR-C2PA-008.
+	FetchManifestFn func() ([]byte, error)
+
+	// CheckStatusFn, when set, is called with the statusListCredential URL and
+	// statusListIndex parsed from the embedded VC to query live revocation state
+	// (DCS-OR-C2PA-006). Returns "active" or "revoked".
+	CheckStatusFn func(statusListCredential string, index uint32) (string, error)
 }
 
 // TemplateVerifier holds the dependencies for template re-rendering.
 type TemplateVerifier struct {
 	BuildFn func(jsonld []byte) ([]byte, error)
+	// FetchFn mirrors ContractVerifier.FetchFn for templates (DCS-OR-C2PA-008).
+	FetchFn func() ([]byte, error)
+	// FetchManifestFn mirrors ContractVerifier.FetchManifestFn for templates.
+	FetchManifestFn func() ([]byte, error)
+	// CheckStatusFn mirrors ContractVerifier.CheckStatusFn for templates (DCS-OR-C2PA-006).
+	CheckStatusFn func(statusListCredential string, index uint32) (string, error)
 }
 
 // Verify extracts the embedded JSON-LD from pdfBytes, re-renders the base PDF,
-// and compares SHA-256 hashes.
+// and compares SHA-256 hashes. Also verifies C2PA signatures and extracts the status list URI from the VC.
 func (v *ContractVerifier) Verify(pdfBytes []byte) (*Result, error) {
-	return verify(pdfBytes, v.BuildFn)
+	return verify(pdfBytes, v.BuildFn, v.FetchFn, v.FetchManifestFn, v.CheckStatusFn)
 }
 
 // Verify is the template counterpart.
 func (v *TemplateVerifier) Verify(pdfBytes []byte) (*Result, error) {
-	return verify(pdfBytes, v.BuildFn)
+	return verify(pdfBytes, v.BuildFn, v.FetchFn, v.FetchManifestFn, v.CheckStatusFn)
 }
 
-func verify(pdfBytes []byte, buildFn func([]byte) ([]byte, error)) (*Result, error) {
+func verify(
+	pdfBytes []byte,
+	buildFn func([]byte) ([]byte, error),
+	fetchFn func() ([]byte, error),
+	fetchManifestFn func() ([]byte, error),
+	checkStatusFn func(statusListCredential string, index uint32) (string, error),
+) (*Result, error) {
+	manifestSource := "embedded"
+	remoteManifestBytes := []byte(nil)
+
+	// Check whether any incremental updates (C2PA manifests, PAdES signatures, etc.)
+	// have been appended.  We look for a "startxref" keyword after the first %%EOF,
+	// because every well-formed incremental update section ends with
+	// "startxref\nN\n%%EOF" — whereas compressed stream bytes that accidentally
+	// contain the %%EOF byte sequence will not have "startxref" immediately after.
+	// When no incremental updates are found the manifest may have been stripped;
+	// attempt to retrieve the canonical copy from remote storage (DCS-OR-C2PA-008).
+	verifyPDFBytes := pdfBytes
+	if !hasIncrementalUpdates(verifyPDFBytes) {
+		if fetchManifestFn != nil {
+			if manifestBytes, manifestErr := fetchManifestFn(); manifestErr == nil && len(manifestBytes) > 0 {
+				remoteManifestBytes = manifestBytes
+				manifestSource = "remote"
+			}
+		}
+		if fetchFn != nil {
+			canonical, fetchErr := fetchFn()
+			if fetchErr == nil && hasIncrementalUpdates(canonical) {
+				verifyPDFBytes = canonical
+				manifestSource = "remote"
+			} else {
+				if len(remoteManifestBytes) == 0 {
+					manifestSource = "none"
+				}
+			}
+		} else {
+			if len(remoteManifestBytes) == 0 {
+				manifestSource = "none"
+			}
+		}
+	}
+
+	// Extract and verify C2PA manifest (DCS-OR-C2PA-006).
+	c2paManifestFound, c2paSignatureValid := false, false
+	lifecycleStatus := ""
+	if isValid, manifestBytes, err := c2pa.ExtractAndVerifyManifest(verifyPDFBytes); err == nil {
+		c2paManifestFound = isValid
+		c2paSignatureValid = isValid
+		if len(manifestBytes) > 0 {
+			lifecycleStatus = c2pa.ExtractLifecycleStatus(manifestBytes)
+		}
+	}
+	if !c2paManifestFound && len(remoteManifestBytes) > 0 {
+		if isValid, err := c2pa.VerifyManifestBytes(remoteManifestBytes); err == nil {
+			c2paManifestFound = isValid
+			c2paSignatureValid = isValid
+			lifecycleStatus = c2pa.ExtractLifecycleStatus(remoteManifestBytes)
+		}
+	}
+
+	// Extract and verify W3C VC proof (DCS-OR-C2PA-006).
+	vcProofValid := false
+	if isValid, _, err := c2pa.ExtractAndVerifyVC(verifyPDFBytes); err == nil {
+		vcProofValid = isValid
+	}
+
+	// Verify detached PDF signatures (PAdES/PKCS#7) when present.
+	pdfSigCount, pdfSigValid := 0, false
+	if count, valid, sigErr := VerifyPDFSignatures(verifyPDFBytes); sigErr == nil {
+		pdfSigCount = count
+		pdfSigValid = valid
+	}
+
 	// Strip any incremental updates (C2PA manifests, future PAdES) appended after
 	// the first %%EOF to recover the base PDF layer.
-	basePDF, err := extractBasePDF(pdfBytes)
+	basePDF, err := extractBasePDF(verifyPDFBytes)
 	if err != nil {
 		return nil, fmt.Errorf("extract base PDF layer: %w", err)
 	}
@@ -74,11 +198,39 @@ func verify(pdfBytes []byte, buildFn func([]byte) ([]byte, error)) (*Result, err
 	basePDFHash := sha256hex(regenerated)
 	storedHash := sha256hex(basePDF)
 
+	// Extract the status list URI and query live revocation state (DCS-OR-C2PA-006).
+	statusListURI := ""
+	statusListStatus := ""
+	if vcProofValid {
+		// Extract VC fields from the same byte source used for provenance checks.
+		if vcIsValid, vcBytes, vcErr := c2pa.ExtractAndVerifyVC(verifyPDFBytes); vcIsValid && vcErr == nil {
+			statusListURI = c2pa.ExtractStatusListURI(vcBytes)
+			if checkStatusFn != nil {
+				if cred, idx, ok := c2pa.ExtractCredentialStatusFields(vcBytes); ok {
+					var statusErr error
+					statusListStatus, statusErr = checkStatusFn(cred, idx)
+					if statusErr != nil {
+						return nil, fmt.Errorf("query status list (DCS-OR-C2PA-006): %w", statusErr)
+					}
+				}
+			}
+		}
+	}
+
 	return &Result{
-		Match:             bytes.Equal(basePDF, regenerated),
-		JSONLDHash:        jsonldHash,
-		BasePDFHash:       basePDFHash,
-		StoredBasePDFHash: storedHash,
+		Match:              bytes.Equal(basePDF, regenerated),
+		JSONLDHash:         jsonldHash,
+		BasePDFHash:        basePDFHash,
+		StoredBasePDFHash:  storedHash,
+		ManifestSource:     manifestSource,
+		C2PAManifestFound:  c2paManifestFound,
+		C2PASignatureValid: c2paSignatureValid,
+		VCProofValid:       vcProofValid,
+		StatusListURI:      statusListURI,
+		LifecycleStatus:    lifecycleStatus,
+		StatusListStatus:   statusListStatus,
+		PDFSignatureCount:  pdfSigCount,
+		PDFSignatureValid:  pdfSigValid,
 	}, nil
 }
 
@@ -106,8 +258,7 @@ func extractBasePDF(pdf []byte) ([]byte, error) {
 // "contract.jsonld" filename in the PDF's embedded-files name tree and then
 // decode the associated stream.
 //
-// This is a best-effort parser sufficient for our use case; it does not attempt
-// full PDF spec compliance.
+// This parser covers the attachment layout produced by the builder package.
 func ExtractJSONLD(pdfBytes []byte) ([]byte, error) {
 	// fpdf writes the attachment content as a compressed stream object.
 	// The filename "contract.jsonld" appears in an /EmbeddedFiles name tree.
@@ -147,6 +298,25 @@ func ExtractJSONLD(pdfBytes []byte) ([]byte, error) {
 		return nil, fmt.Errorf("decompress attachment stream: %w", err)
 	}
 	return decompressed, nil
+}
+
+// hasIncrementalUpdates returns true when pdfBytes contains at least one real
+// PDF incremental update section appended after the first %%EOF.
+//
+// Detection: scan for "startxref" anywhere after the first %%EOF marker.
+// Every incremental update must contain a new cross-reference section that
+// ends with "startxref\nN\n%%EOF", so its presence is a reliable indicator.
+// Compressed stream bytes that happen to contain the %%EOF sequence will not
+// be followed by "startxref", making this test more robust than a simple
+// byte-length comparison.
+func hasIncrementalUpdates(pdf []byte) bool {
+	eofMarker := []byte("%%EOF")
+	idx := bytes.Index(pdf, eofMarker)
+	if idx == -1 {
+		return false
+	}
+	after := pdf[idx+len(eofMarker):]
+	return bytes.Contains(after, []byte("startxref"))
 }
 
 func sha256hex(b []byte) string {

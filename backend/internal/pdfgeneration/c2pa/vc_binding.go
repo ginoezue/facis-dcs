@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -18,34 +20,57 @@ type VCSigner interface {
 // (DCS-OR-C2PA-004). It is returned by IssueLifecycleVC and stored as vc_id in the
 // LifecycleAssertion once issued.
 type VCBinding struct {
-	Context           []string               `json:"@context"`
+	Context           []interface{}          `json:"@context"`
 	Type              []string               `json:"type"`
 	ID                string                 `json:"id"`
 	Issuer            string                 `json:"issuer"`
-	IssuanceDate      time.Time              `json:"issuanceDate"`
+	IssuanceDate      time.Time             `json:"issuanceDate"`
 	CredentialSubject map[string]interface{} `json:"credentialSubject"`
+	// CredentialStatus links this VC to the XFSC status list entry so
+	// verifiers can check revocation (DCS-OR-C2PA-004, DCS-OR-C2PA-005).
+	CredentialStatus map[string]interface{} `json:"credentialStatus,omitempty"`
 }
 
 // IssueLifecycleVC builds and signs a W3C VC recording the lifecycle event.
+// statusListURI is the URL of the XFSC status list entry for this contract;
+// it is embedded as credentialStatus.id so verifiers can check revocation
+// (DCS-OR-C2PA-004, DCS-OR-C2PA-005).
 // The signed VC bytes are returned; the VC id is derived from the SHA-256 of
 // its content so it can be stored in LifecycleAssertion.VCId.
-func IssueLifecycleVC(ctx context.Context, signer VCSigner, issuerDID string, assertion LifecycleAssertion) (json.RawMessage, string, error) {
+func IssueLifecycleVC(ctx context.Context, signer VCSigner, issuerDID, statusListURI string, assertion LifecycleAssertion) (json.RawMessage, string, error) {
+	subjectID := normalizeSubjectID(assertion.ContractID)
+	securityCtx := vcSecuritySuiteContext()
+
 	unsignedVC := VCBinding{
-		Context: []string{
+		Context: []interface{}{
 			"https://www.w3.org/2018/credentials/v1",
-			"https://w3id.org/security/suites/ed25519-2020/v1",
+			securityCtx,
+			map[string]interface{}{
+				"dcs":                         "https://w3id.org/facis/dcs#",
+				"ContractLifecycleCredential": "dcs:ContractLifecycleCredential",
+				"contract_id":                 "dcs:contractId",
+				"file_hash":                   "dcs:fileHash",
+				"status":                      "dcs:status",
+				"reason":                      "dcs:reason",
+				"effective_at": map[string]interface{}{
+					"@id":   "dcs:effectiveAt",
+					"@type": "http://www.w3.org/2001/XMLSchema#dateTime",
+				},
+			},
 		},
 		Type:         []string{"VerifiableCredential", "ContractLifecycleCredential"},
 		ID:           "", // filled after hash
 		Issuer:       issuerDID,
 		IssuanceDate: assertion.EffectiveAt,
 		CredentialSubject: map[string]interface{}{
-			"contract_id": assertion.ContractID,
-			"file_hash":   assertion.FileHash,
-			"status":      assertion.Status,
-			"reason":      assertion.Reason,
+			"id":           subjectID,
+			"contract_id":  assertion.ContractID,
+			"file_hash":    assertion.FileHash,
+			"status":       assertion.Status,
+			"reason":       assertion.Reason,
 			"effective_at": assertion.EffectiveAt.UTC().Format(time.RFC3339),
 		},
+		CredentialStatus: buildCredentialStatus(statusListURI, assertion.ContractID),
 	}
 
 	raw, err := json.Marshal(unsignedVC)
@@ -68,4 +93,39 @@ func IssueLifecycleVC(ctx context.Context, signer VCSigner, issuerDID string, as
 	}
 
 	return signed, vcID, nil
+}
+
+// buildCredentialStatus constructs the W3C StatusList2021 credentialStatus
+// object that links this VC to the XFSC bitstring status list (DCS-OR-C2PA-005).
+// Returns nil when statusListURI is empty so the field is omitted from the VC.
+func buildCredentialStatus(statusListURI, contractID string) map[string]interface{} {
+	if statusListURI == "" {
+		return nil
+	}
+	return map[string]interface{}{
+		"id":                   fmt.Sprintf("%s#%d", statusListURI, StatusListIndex(contractID)),
+		"type":                 "StatusList2021Entry",
+		"statusPurpose":        "revocation",
+		"statusListIndex":      fmt.Sprintf("%d", StatusListIndex(contractID)),
+		"statusListCredential": statusListURI,
+	}
+}
+
+func vcSecuritySuiteContext() string {
+	return "https://w3id.org/security/suites/ed25519-2020/v1"
+}
+
+// normalizeSubjectID returns a URI to satisfy strict VC signer validation.
+// If the input is already an absolute URI (including did:... and urn:...), it
+// is used as-is. Otherwise, a deterministic URN is generated from the raw value.
+func normalizeSubjectID(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s != "" {
+		u, err := url.Parse(s)
+		if err == nil && u.IsAbs() && u.Scheme != "" {
+			return s
+		}
+	}
+	h := sha256.Sum256([]byte(s))
+	return "urn:dcs:subject:" + hex.EncodeToString(h[:])
 }

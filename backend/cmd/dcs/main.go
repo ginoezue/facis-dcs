@@ -11,7 +11,10 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-
+	"github.com/jmoiron/sqlx"
+	"github.com/nats-io/nats.go"
+	"goa.design/clue/debug"
+	"goa.design/clue/log"
 	genauth "digital-contracting-service/gen/auth"
 	contractstoragearchive "digital-contracting-service/gen/contract_storage_archive"
 	contractworkflowengine "digital-contracting-service/gen/contract_workflow_engine"
@@ -44,10 +47,6 @@ import (
 	"digital-contracting-service/internal/webhookplatform"
 	"digital-contracting-service/migrations"
 
-	"github.com/jmoiron/sqlx"
-	"github.com/nats-io/nats.go"
-	"goa.design/clue/debug"
-	"goa.design/clue/log"
 )
 
 func main() {
@@ -204,13 +203,40 @@ func main() {
 	)
 
 	// Initialize Crypto Provider Service client for C2PA signing.
-	vaultAddr := os.Getenv("VAULT_ADDR")
-	vaultToken := os.Getenv("VAULT_TOKEN")
-	vaultTransitMount := os.Getenv("VAULT_TRANSIT_MOUNT")
-	vaultTransitKey := os.Getenv("VAULT_TRANSIT_KEY")
+	cryptoProviderURL := os.Getenv("CRYPTO_PROVIDER_URL")
+	cryptoProviderNamespace := os.Getenv("CRYPTO_PROVIDER_NAMESPACE")
+	cryptoProviderKey := os.Getenv("CRYPTO_PROVIDER_KEY")
+	cryptoProviderCertChainFile := strings.TrimSpace(os.Getenv("CRYPTO_PROVIDER_CERT_CHAIN_FILE"))
 	issuerDID := os.Getenv("ISSUER_DID")
-	cryptoClient := cryptoprovider.NewClient(vaultAddr, vaultToken, vaultTransitMount, vaultTransitKey)
+	cryptoClient := cryptoprovider.NewClient(cryptoProviderURL, cryptoProviderNamespace, cryptoProviderKey)
+
+	if cryptoProviderCertChainFile == "" {
+		log.Fatalf(ctx, nil, "CRYPTO_PROVIDER_CERT_CHAIN_FILE is required")
+	}
+	if err := cryptoClient.SetCertificateChainFromPEMFile(cryptoProviderCertChainFile); err != nil {
+		log.Fatalf(ctx, err, "load crypto provider certificate chain from file")
+	}
+
 	tsaCfg := c2pa.TSAConfig{URL: os.Getenv("TSA_URL")}
+
+	// Probe crypto provider liveness before accepting traffic.
+	if cryptoProviderURL == "" {
+		log.Fatalf(ctx, nil, "CRYPTO_PROVIDER_URL is required")
+	}
+	if err := probeHTTP(cryptoProviderURL + "/readiness"); err != nil {
+		log.Fatalf(ctx, err, "crypto provider not reachable at %s", cryptoProviderURL)
+	}
+
+	// Initialize OCM-W Status List Service client (DCS-OR-C2PA-005).
+	statusListServiceURL := os.Getenv("STATUSLIST_SERVICE_URL")
+	if statusListServiceURL == "" {
+		log.Fatalf(ctx, nil, "STATUSLIST_SERVICE_URL is required (DCS-OR-C2PA-005)")
+	}
+	if err := probeHTTPAny(statusListServiceURL+"/health", statusListServiceURL+"/v1/metrics/health"); err != nil {
+		log.Fatalf(ctx, err, "status list service not reachable at %s", statusListServiceURL)
+	}
+	statusListTenantID := os.Getenv("STATUSLIST_TENANT_ID") // defaults to "default" when empty
+	statusListPublisher := c2pa.NewOCMWStatusListPublisher(statusListServiceURL, issuerDID, statusListTenantID)
 
 	// Initialize the service.
 	var (
@@ -233,34 +259,39 @@ func main() {
 		dcsToDcsSvc = service.NewDcsToDcs(jwtAuth)
 		externalTargetSystemAPISvc = service.NewExternalTargetSystemAPI(jwtAuth)
 		orchestrationWebhooksSvc = service.NewOrchestrationWebhooks(jwtAuth)
-		pdfGenerationSvc = service.NewPDFGeneration(db, jwtAuth, ipfsAPIClient, &cweRepo, &ctRepo, cryptoClient, tsaCfg, issuerDID)
-		processAuditAndComplianceSvc = service.NewProcessAuditAndCompliance(db, jwtAuth, auditTrailReader, &ctRepo)
+		pdfGenerationSvc = service.NewPDFGeneration(db, jwtAuth, ipfsAPIClient, &cweRepo, &ctRepo, cryptoClient, tsaCfg, issuerDID, c2pa.NewLocalVCIssuer(cryptoClient, issuerDID, statusListPublisher))
+		processAuditAndComplianceSvc = service.NewProcessAuditAndCompliance(db, jwtAuth, auditTrailReader, &ctRepo, &cweRepo)
 		signatureManagementSvc = service.NewSignatureManagement(db, jwtAuth, &smCRepo, auditTrailReader, dss.StubClient{}, ipfsAPIClient)
 		templateCatalogueIntegrationSvc = service.NewTemplateCatalogueIntegration(jwtAuth, templateCatalogueClient)
 		templateRepositorySvc = service.NewTemplateRepository(db, jwtAuth, &ctRepo, &ctRTRepo, &ctATRepo, templateCatalogueClient, auditTrailReader)
 	}
 
+	// Channel used by background workers and signal handler to notify main to exit.
+	errc := make(chan error)
+
 	// Start the PDF lifecycle C2PA subscriber (appends C2PA assertions on state changes).
 	// Only start when a real signing URL is configured; without one, the subscriber
 	// would attempt signing on every CWE event and log spurious HTTP errors.
-	if vaultAddr != "" {
-		pdfSubClient, err := event.NewNatsSubClient(conf.EventBusTopic(), natsURL)
-		if err != nil {
-			log.Fatalf(ctx, err, "Could not create PDF generation NATS subscriber")
-		}
-		defer pdfSubClient.Close()
-		pdfSub := &pdfevent.Subscriber{
-			DB:         db,
-			IPFSClient: ipfsAPIClient,
-			CRepo:      &cweRepo,
-			Signer:     cryptoClient,
-			TSACfg:     tsaCfg,
-			IssuerDID:  issuerDID,
-		}
-		if err := pdfSub.Start(pdfSubClient); err != nil {
-			log.Fatalf(ctx, err, "Could not start PDF generation subscriber")
-		}
+	pdfSubClient, err := event.NewNatsSubClient(conf.EventBusTopic(), natsURL)
+	if err != nil {
+		log.Fatalf(ctx, err, "Could not create PDF generation NATS subscriber")
 	}
+	defer pdfSubClient.Close()
+	pdfSub := &pdfevent.Subscriber{
+		DB:         db,
+		IPFSClient: ipfsAPIClient,
+		CRepo:      &cweRepo,
+		TRepo:      &ctRepo,
+		Signer:     cryptoClient,
+		TSACfg:     tsaCfg,
+		IssuerDID:  issuerDID,
+		VCIssuer:   c2pa.NewLocalVCIssuer(cryptoClient, issuerDID, statusListPublisher),
+	}
+	go func() {
+		if err := pdfSub.Start(pdfSubClient); err != nil {
+			errc <- fmt.Errorf("could not start PDF generation subscriber: %w", err)
+		}
+	}()
 
 	// Wrap the service in endpoints that can be invoked from other service
 	// potentially running in different processes.
@@ -312,10 +343,6 @@ func main() {
 		templateRepositoryEndpoints.Use(debug.LogPayloads())
 		templateRepositoryEndpoints.Use(log.Endpoint)
 	}
-
-	// Create channel used by both the signal handler and server goroutines
-	// to notify the main goroutine when to stop the server.
-	errc := make(chan error)
 
 	// Setup interrupt handler. This optional step configures the process so
 	// that SIGINT and SIGTERM signals cause the service to stop gracefully.

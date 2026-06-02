@@ -1,6 +1,10 @@
 package c2pa
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // LifecycleAssertion is the dcs.contract.lifecycle assertion carried in each C2PA
 // manifest (DCS-OR-C2PA-003). It records the contract's state at the time the
@@ -13,13 +17,15 @@ type LifecycleAssertion struct {
 	// ContractID is the contract's DID.
 	ContractID string `json:"contract_id"`
 
-	// FileHash is the SHA-256 of the JSON-LD source bytes (hex-encoded).
-	// This binds the manifest to a specific version of the machine-readable content.
+	// FileHash is the SHA-256 of the protected PDF artifact bytes (hex-encoded)
+	// immediately before the current manifest append operation. This is the
+	// SRS-required binding field used in both lifecycle assertions and
+	// VC credentialSubject.file_hash.
 	FileHash string `json:"file_hash"`
 
-	// PDFHash is the SHA-256 of the base PDF bytes (hex-encoded) at the time this
-	// assertion was created. Together with FileHash it binds the manifest to both
-	// representations (DCS-FR-SM-11).
+	// PDFHash is the SHA-256 of the same artifact bytes used by FileHash. It is
+	// carried explicitly so c2pa.hash.data and lifecycle assertion checks can be
+	// compared directly without cross-field derivation.
 	PDFHash string `json:"pdf_hash"`
 
 	// RendererVersion identifies the renderer build that produced the PDF. A renderer
@@ -50,7 +56,7 @@ type LifecycleAssertion struct {
 	PrevManifestHash string `json:"prev_manifest_hash,omitempty"`
 }
 
-const lifecycleAssertionLabel = "dcs.contract.lifecycle"
+const lifecycleAssertionLabel = "org.facis.dcs.contract.lifecycle"
 
 // NewLifecycleAssertion constructs a LifecycleAssertion with the required fields.
 func NewLifecycleAssertion(contractID, fileHash, pdfHash, rendererVersion, status, reason, authority, vcID, prevManifestHash string, effectiveAt time.Time) LifecycleAssertion {
@@ -67,4 +73,52 @@ func NewLifecycleAssertion(contractID, fileHash, pdfHash, rendererVersion, statu
 		VCId:             vcID,
 		PrevManifestHash: prevManifestHash,
 	}
+}
+
+// MapCWEStateToC2PAStrict maps a CWE contract state to the canonical C2PA
+// lifecycle vocabulary defined in DCS-OR-C2PA-003.
+//
+// No fallback mapping is applied: unsupported states return an error so callers
+// can fail fast in green-field strict-compliance mode.
+func MapCWEStateToC2PAStrict(cweState string) (string, error) {
+	switch strings.ToUpper(cweState) {
+	case "DRAFT":
+		return "draft", nil
+	case "SUBMITTED", "REVIEWED", "APPROVED":
+		// Reviewed/submitted/approved are intermediate steps toward an active
+		// contract; map to "active" as the closest SRS equivalent.
+		return "active", nil
+	case "NEGOTIATION", "REJECTED":
+		// Negotiation and rejection are amendment/review cycles before the
+		// contract becomes active; treated as "amended" (under negotiation)
+		// or "active" (re-submitted after rejection).
+		// Use "amended" because the content may have changed.
+		return "amended", nil
+	case "TERMINATED":
+		return "terminated", nil
+	case "EXPIRED":
+		return "expired", nil
+	case "SUSPENDED":
+		return "suspended", nil
+	case "REPLACED":
+		return "replaced", nil
+	default:
+		// Pass-through if the caller already uses the SRS vocabulary.
+		lower := strings.ToLower(cweState)
+		switch lower {
+		case "draft", "active", "amended", "suspended", "terminated", "expired", "replaced":
+			return lower, nil
+		}
+		return "", fmt.Errorf("unsupported lifecycle state %q (allowed: DRAFT,SUBMITTED,REVIEWED,APPROVED,NEGOTIATION,REJECTED,TERMINATED,EXPIRED,SUSPENDED,REPLACED,draft,active,amended,suspended,terminated,expired,replaced)", cweState)
+	}
+}
+
+// MapCWEStateToC2PA is a convenience wrapper that returns an empty string for
+// unsupported states. New code should prefer MapCWEStateToC2PAStrict.
+func MapCWEStateToC2PA(cweState string) string {
+	mapped, err := MapCWEStateToC2PAStrict(cweState)
+	if err != nil {
+		return ""
+	}
+	return mapped
 }

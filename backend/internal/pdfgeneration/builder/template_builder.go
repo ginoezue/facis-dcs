@@ -1,7 +1,6 @@
 package builder
 
 import (
-	"bytes"
 	"fmt"
 	"time"
 
@@ -49,15 +48,15 @@ func BuildTemplate(in TemplateInput) ([]byte, error) {
 		f.SetAttachments([]fpdf.Attachment{
 			{
 				Content:     in.TemplateData,
-				Filename:    "contract.jsonld",
+				Filename:    "template.jsonld",
 				Description: "Machine-readable JSON-LD source for this template",
 			},
 		})
 	}
 
-	var buf bytes.Buffer
-	if err := f.Output(&buf); err != nil {
+	pdf, err := renderPDF(f)
+	if err != nil {
 		return nil, fmt.Errorf("render template PDF: %w", err)
 	}
-	return buf.Bytes(), nil
+	return pdf, nil
 }
