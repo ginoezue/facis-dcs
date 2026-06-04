@@ -22,7 +22,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/veraison/go-cose v1.3.0
 	goa.design/clue v1.2.4
-	goa.design/goa/v3 v3.26.0
+	goa.design/goa/v3 v3.24.2
 	goa.design/plugins/v3 v3.24.2
 	gopkg.in/yaml.v3 v3.0.1
 )

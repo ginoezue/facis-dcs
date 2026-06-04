@@ -99,22 +99,19 @@ neo4j:
     nodePortHttp: 30474
     nodePortBolt: 30687
 
-# XFSC Federated Catalogue (requires neo4j, keycloak, postgresql with "fc" database)
-# See charts/federated-catalogue/values.yaml for all configurable fields.
 federatedCatalogue:
-  enabled: false
-  # URL the DCS backend uses to reach the Federated Catalogue API
-  apiURL: ""
-  secretRef:
-    name: ""
-    key: "FEDERATED_CATALOGUE_API_URL"
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 1Gi
+  enabled: true
+  service:
+    type: NodePort
+    nodePort: 30081
+  keycloak:
+    hostname: "localhost:30080"
+    issuerScheme: "http"
+  oauth:
+    clientID: "dcs-fc-client"
+  # Allow POSTing self-descriptions without signature verification in dev
+  verificationVpSignature: false
+  verificationVcSignature: false
 
 cryptoProvider:
   enabled: true

@@ -409,6 +409,12 @@ def step_when_attempt_access_contract(context, name):
     context.requests_response = get_with_headers(context, contract_retrieve_by_id_url(context, did))
 
 
+@when('I attempt to access the synchronized view of contract "{name}"')
+def step_when_attempt_access_synchronized_view(context, name):
+    did = (getattr(context, "contract_dids", None) or {}).get(name, "did:example:missing")
+    context.requests_response = get_with_headers(context, contract_retrieve_by_id_url(context, did))
+
+
 @when("automated compliance checks are performed")
 def step_when_automated_compliance_checks(context):
     name = "Service Agreement"
