@@ -50,7 +50,7 @@
                 :key="clause.blockId"
                 type="button"
                 class="flex min-h-[44px] cursor-pointer flex-col justify-center rounded-lg border border-base-300 bg-base-100 px-3 py-2 text-left transition-colors select-none hover:bg-base-200"
-                @click="handleAddClause(clause.blockId)"
+                @click="handleAddClause(clause)"
               >
                 <span class="text-sm font-medium text-base-content">{{ clause.title || 'Untitled clause' }}</span>
                 <p class="mt-0.5 line-clamp-2 text-xs leading-relaxed text-base-content/70">
@@ -76,6 +76,7 @@
 import { computed, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTemplateDraftStore } from '@template-repository/store/templateDraftStore'
+import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
 import { useTemplateEditorUiStore } from '@template-repository/store/templateEditorUiStore'
 import type { SubTemplateSnapshot } from '@/models/contract-template'
 import BlockPaletteItem from './document-block/BlockPaletteItem.vue'
@@ -93,8 +94,10 @@ import {
   type ClauseBlock,
   isClauseBlock,
 } from '../../models/contract-template.ts'
+import { clauseConstraints, type DcsClause } from '@/models/dcs-jsonld'
 
 const draftStore = useTemplateDraftStore()
+const dcsStore = useDcsDraftStore()
 const uiStore = useTemplateEditorUiStore()
 const { addBlockModalContext } = storeToRefs(uiStore)
 const { documentBlocks, semanticConditions, subTemplateSnapshots } = storeToRefs(draftStore)
@@ -122,9 +125,26 @@ const referenceCountByDid = computed(() => {
 /** Clause blocks that are not referenced in the document outline, sorted by title. */
 const unusedClauses = computed((): ClauseBlock[] => {
   const inOutline = draftStore.blockIdsInOutline
-  const clauses = documentBlocks.value.filter((b): b is ClauseBlock => isClauseBlock(b))
-  const unused = clauses.filter((c) => !inOutline.has(c.blockId))
-  return [...unused].sort((a, b) => (a.title ?? '').localeCompare(b.title ?? ''))
+  const legacyClauses = documentBlocks.value.filter((b): b is ClauseBlock => isClauseBlock(b))
+  const unusedLegacy = legacyClauses.filter((c) => !inOutline.has(c.blockId))
+  // Clauses from dcsDraftStore not yet placed in the outline
+  const unusedDcs: ClauseBlock[] = dcsStore.clauses
+    .filter((c) => !inOutline.has(c['@id']))
+    .map((c): ClauseBlock => ({
+      blockId: c['@id'],
+      type: DocumentBlockType.Clause,
+      text: c['dcs:content'],
+      title: c['dcs:title'],
+      conditionIds: clauseConstraints(c).map((ct) => ct['dcs:placeholder']).filter((p): p is string => !!p),
+    }))
+  const combined = [...unusedLegacy, ...unusedDcs]
+  // Deduplicate by blockId (in case a dcs clause was already mirrored in legacy store)
+  const seen = new Set<string>()
+  return combined.filter((c) => {
+    if (seen.has(c.blockId)) return false
+    seen.add(c.blockId)
+    return true
+  }).sort((a, b) => (a.title ?? '').localeCompare(b.title ?? ''))
 })
 const clauseSearch = ref('')
 const filteredUnusedClauses = computed((): ClauseBlock[] => {
@@ -177,14 +197,21 @@ function handleAddApprovedTemplate(template: SubTemplateSnapshot) {
   uiStore.closeAddBlockModal()
 }
 
-function handleAddClause(clauseBlockId: string) {
+function handleAddClause(clause: ClauseBlock) {
   const ctx = addBlockModalContext.value
   if (ctx === null) return
+  // Ensure the block exists in templateDraftStore.documentBlocks before placing it
+  // in the outline. dcsDraftStore clauses use their @id as blockId.
+  draftStore.addClause({
+    blockId: clause.blockId,
+    title: clause.title,
+    text: clause.text,
+    conditionIds: clause.conditionIds,
+  })
   draftStore.addBlock(ctx.parentBlockId, ctx.insertIndex, {
     blockType: DocumentBlockType.Clause,
-    // Don't set text here, clauseBlockId is enough to link to the document outline.
     text: '',
-    clauseBlockId,
+    clauseBlockId: clause.blockId,
   })
   uiStore.closeAddBlockModal()
 }

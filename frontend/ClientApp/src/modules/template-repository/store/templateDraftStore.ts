@@ -253,13 +253,15 @@ export const useTemplateDraftStore = defineStore(storeId, {
     // Clauses operations: add, delete, update
     /** Adds a clause block to documentBlocks only */
     addClause(payload: {
+      blockId?: string
       title?: string
       text: string
       conditionIds: string[]
       schemaRef?: string
       semanticPath?: string
     }): string {
-      const blockId = crypto.randomUUID()
+      const blockId = payload.blockId ?? crypto.randomUUID()
+      if (this.documentBlocks.some((b) => b.blockId === blockId)) return blockId
       const block = createBlockFromPayload(blockId, {
         blockType: DocumentBlockType.Clause,
         text: payload.text,
