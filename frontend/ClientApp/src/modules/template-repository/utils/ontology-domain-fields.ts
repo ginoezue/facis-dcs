@@ -47,6 +47,7 @@ export function parseOntologyDomainFields(source: string): DomainFieldDefinition
       }
       const valueConstraintRef = firstResource(statement.text, 'dcs:hasValueConstraint')
       return {
+        iri: statement.subject,
         semanticPath,
         schemaRef,
         type,

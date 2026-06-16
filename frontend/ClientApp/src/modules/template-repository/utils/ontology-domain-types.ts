@@ -1,10 +1,21 @@
 import type {
   DomainFieldDefinition,
-  SemanticConditionParameter,
   SemanticEntityRole,
   SemanticValueConstraint,
 } from '@/modules/template-repository/models/contract-template'
 import { ONTOLOGY_DOMAIN_FIELDS, ONTOLOGY_ENTITY_ROLES, ONTOLOGY_ENTITY_TYPES } from './ontology-domain-fields'
+
+/** Parameter descriptor used for building ODRL constraints in JSON-LD clauses. */
+export interface OntologyConstraintParam {
+  /** Compact IRI for odrl:leftOperand, e.g. "dcst:field-company-legalName". */
+  iri: string
+  /** Short placeholder name for {{placeholder}} in prose and dcs:placeholder. */
+  placeholder: string
+  type: DomainFieldDefinition['type']
+  label: string
+  valueConstraint?: DomainFieldDefinition['valueConstraint']
+  isRequired: boolean
+}
 
 export interface OntologyDomainType {
   id: string
@@ -17,32 +28,33 @@ export interface OntologyDomainType {
 export const ontologyRoleOptions = ONTOLOGY_ENTITY_ROLES
 
 export const ONTOLOGY_DOMAIN_TYPES: readonly OntologyDomainType[] = buildOntologyDomainTypes()
+export const ONTOLOGY_DOMAIN_TYPE_FIELD_IRIS: ReadonlySet<string> = new Set(
+  ONTOLOGY_DOMAIN_TYPES.flatMap((domainType) => domainType.fields.map((field) => field.iri)),
+)
+
+/** @deprecated Use ONTOLOGY_DOMAIN_TYPE_FIELD_IRIS. Kept for legacy SemanticRuleForm compatibility. */
 export const ONTOLOGY_DOMAIN_TYPE_FIELD_PATHS: ReadonlySet<string> = new Set(
   ONTOLOGY_DOMAIN_TYPES.flatMap((domainType) => domainType.fields.map((field) => field.semanticPath)),
 )
 
-export function buildOntologyDomainTypeParameters(domainType: OntologyDomainType): SemanticConditionParameter[] {
+export function buildOntologyDomainTypeParameters(domainType: OntologyDomainType): OntologyConstraintParam[] {
   return domainType.fields.map((field) => ({
-    parameterName: field.semanticPath,
+    iri: field.iri,
+    placeholder: iriToPlaceholder(field.iri),
     type: field.type,
-    schemaRef: field.schemaRef,
-    semanticPath: field.semanticPath,
+    label: field.label,
     valueConstraint: cloneValueConstraint(field.valueConstraint),
-    uiMetadata: { label: field.label },
     isRequired: true,
-    operators: [],
-    value: undefined,
   }))
 }
 
 export function buildOntologyDomainTypeClauseText(
-  conditionId: string,
   domainType: OntologyDomainType,
   role?: SemanticEntityRole,
 ): string {
   const roleLabel = role ? roleLabelFor(role) : ''
   const title = roleLabel ? `${roleLabel} ${domainType.label}` : domainType.label
-  const fieldLines = domainType.fields.map((field) => buildDomainTypeClauseFieldLine(conditionId, field))
+  const fieldLines = domainType.fields.map((field) => buildDomainTypeClauseFieldLine(field))
   return [title, '', ...fieldLines].join('\n')
 }
 
@@ -50,9 +62,15 @@ export function roleLabelFor(role: SemanticEntityRole): string {
   return ONTOLOGY_ENTITY_ROLES.find((option) => option.value === role)?.label ?? role
 }
 
-function buildDomainTypeClauseFieldLine(conditionId: string, field: DomainFieldDefinition): string {
-  const label = field.label || field.semanticPath
-  return `${label}: {{${conditionId}.${field.semanticPath}}}`
+function buildDomainTypeClauseFieldLine(field: DomainFieldDefinition): string {
+  return `${field.label}: {{${iriToPlaceholder(field.iri)}}}`
+}
+
+/** Converts a compact IRI to a camelCase placeholder name.
+ *  e.g. "dcst:field-company-legalName" → "companyLegalName" */
+export function iriToPlaceholder(iri: string): string {
+  const local = iri.replace(/^[^:]+:/, '').replace(/^field-/, '')
+  return local.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())
 }
 
 function buildOntologyDomainTypes(): OntologyDomainType[] {
@@ -64,7 +82,7 @@ function buildOntologyDomainTypes(): OntologyDomainType[] {
       id: entityType.value,
       label: entityType.label,
       entityType: entityType.value,
-      roleRequired: fields.some((field) => firstSemanticPathSegment(field.semanticPath) === 'company'),
+      roleRequired: fields.some((field) => field.iri.includes('-company-')),
       fields,
     })
   }
@@ -75,15 +93,18 @@ function fieldsForEntityType(entityType: string): DomainFieldDefinition[] {
   const directlyTyped = ONTOLOGY_DOMAIN_FIELDS.filter(
     (field) => localOntologyName(field.statementType ?? '') === entityType,
   )
-  const fieldPrefixes = new Set(directlyTyped.map((field) => firstSemanticPathSegment(field.semanticPath)))
-  if (!fieldPrefixes.size) return []
-  return ONTOLOGY_DOMAIN_FIELDS.filter((field) => fieldPrefixes.has(firstSemanticPathSegment(field.semanticPath))).sort(
+  const iriPrefixes = new Set(directlyTyped.map((field) => iriGroupPrefix(field.iri)))
+  if (!iriPrefixes.size) return []
+  return ONTOLOGY_DOMAIN_FIELDS.filter((field) => iriPrefixes.has(iriGroupPrefix(field.iri))).sort(
     (left, right) => left.label.localeCompare(right.label),
   )
 }
 
-function firstSemanticPathSegment(path: string): string {
-  return path.split('.', 1)[0] ?? path
+/** Returns the first two dash-separated segments of the IRI local name after stripping "field-".
+ *  e.g. "dcst:field-company-legalName" → "company" */
+function iriGroupPrefix(iri: string): string {
+  const local = iri.replace(/^[^:]+:/, '').replace(/^field-/, '')
+  return local.split('-', 1)[0] ?? local
 }
 
 function localOntologyName(resource: string): string {

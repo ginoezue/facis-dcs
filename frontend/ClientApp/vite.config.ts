@@ -52,6 +52,9 @@ export default defineConfig(({ mode, command }) => {
         '@template-repository': fileURLToPath(new URL('./src/modules/template-repository/', import.meta.url)),
       },
     },
+    optimizeDeps: {
+      include: ['qrcode'],
+    },
     server: {
       proxy: {
         '/api': {

@@ -121,6 +121,9 @@ export const FACIS_SCHEMA_REFS = {
 export type DomainSemanticPath = string
 
 export interface DomainFieldDefinition {
+  /** Compact IRI of the ontology subject, e.g. "dcst:field-company-legalName". Used as odrl:leftOperand in JSON-LD. */
+  iri: string
+  /** Dot-notation path retained for legacy SemanticCondition components. */
   semanticPath: DomainSemanticPath
   schemaRef: string
   type: SemanticParameterType

@@ -6,7 +6,7 @@
         mode="create"
         :initial-title="newClauseTitle"
         :initial-text="newClauseText"
-        :semantic-conditions="newClauseSemanticConditions"
+        :semantic-conditions="[]"
         @submit="addClause"
       />
     </section>
@@ -15,9 +15,9 @@
     <section class="rounded-lg border border-base-300 bg-base-100 p-4 shadow-sm">
       <h3 class="mb-4 text-sm font-semibold text-base-content/80">Existing clauses</h3>
       <ExistingClausesList
-        :clause-blocks="clauseBlocks"
-        :semantic-conditions="semanticConditions"
-        :block-ids-in-outline="store.blockIdsInOutline"
+        :clause-blocks="clauseBlocksForLegacyList"
+        :semantic-conditions="[]"
+        :block-ids-in-outline="new Set()"
         :editing-block-id="editingBlockId"
         :editable="uiStore.isTemplateEditable"
         @delete="deleteClause"
@@ -68,17 +68,10 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { storeToRefs } from 'pinia'
-import { useTemplateDraftStore } from '@template-repository/store/templateDraftStore'
-import {
-  SEMANTIC_CONDITION_SCHEMA_VERSION,
-  isClauseBlock,
-  type ClauseBlock,
-  type SemanticCondition,
-} from '@/modules/template-repository/models/contract-template'
 import ExistingClausesList from '@template-repository/components/clauses-editor/ExistingClausesList.vue'
 import ClauseEditorForm from '@template-repository/components/clauses-editor/ClauseEditorForm.vue'
 import { useTemplateEditorUiStore } from '@template-repository/store/templateEditorUiStore'
+import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
 import {
   ONTOLOGY_DOMAIN_TYPES,
   buildOntologyDomainTypeClauseText,
@@ -86,73 +79,44 @@ import {
   ontologyRoleOptions,
   roleLabelFor,
 } from '@template-repository/utils/ontology-domain-types'
+import type { ClauseBlock } from '@template-repository/models/contract-template'
+import type { DcsClause, OdrlConstraint, OdrlRule } from '@/models/dcs-jsonld'
+import { clauseConstraints } from '@/models/dcs-jsonld'
 
-const store = useTemplateDraftStore()
+const store = useDcsDraftStore()
 const uiStore = useTemplateEditorUiStore()
-const { documentBlocks, semanticConditions: mainSemanticConditions, subTemplateSnapshots } = storeToRefs(store)
 
 const editingBlockId = ref<string | null>(null)
 const selectedDomainTypeRoles = ref<Record<string, string>>({})
 const newClauseTitle = ref('')
 const newClauseText = ref('')
-const draftDomainTypeCondition = ref<SemanticCondition | null>(null)
-const draftDomainTypeMeta = ref<{ schemaRef?: string; semanticPath?: string } | null>(null)
 const ontologyDomainTypes = ONTOLOGY_DOMAIN_TYPES
 const roleOptions = ontologyRoleOptions
 
-/** Extract conditionIds from clause text placeholders {{conditionId.parameterName}}. */
-function conditionIdsFromText(text: string): string[] {
-  const set = new Set<string>()
-  const re = /\{\{([^}]+)\}\}/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text)) !== null) {
-    const inner = m[1] ?? ''
-    const dot = inner.indexOf('.')
-    const conditionId = dot >= 0 ? inner.slice(0, dot) : inner
-    if (conditionId) set.add(conditionId)
-  }
-  return [...set]
-}
-
-const clauseBlocks = computed((): ClauseBlock[] => {
-  const mainClauses = documentBlocks.value.filter((b): b is ClauseBlock => isClauseBlock(b))
-  const subTemplateClauses = subTemplateSnapshots.value.flatMap((subTemplate) =>
-    (subTemplate.template_data?.documentBlocks ?? []).filter((block): block is ClauseBlock => isClauseBlock(block)),
-  )
-  return [...mainClauses, ...subTemplateClauses]
-})
-
-const semanticConditions = computed(() => {
-  const subTemplateConditions = subTemplateSnapshots.value.flatMap(
-    (subTemplate) => subTemplate.template_data?.semanticConditions ?? [],
-  )
-  return [...mainSemanticConditions.value, ...subTemplateConditions]
-})
-
-const newClauseSemanticConditions = computed(() =>
-  draftDomainTypeCondition.value
-    ? [...semanticConditions.value, draftDomainTypeCondition.value]
-    : semanticConditions.value,
+/**
+ * Transform DcsClause[] to ClauseBlock[] so ExistingClausesList can render
+ * without changes.  conditionIds is derived from constraint placeholders.
+ */
+const clauseBlocksForLegacyList = computed((): ClauseBlock[] =>
+  store.clauses.map((clause: DcsClause): ClauseBlock => ({
+    blockId: clause['@id'],
+    type: 'CLAUSE',
+    text: clause['dcs:content'],
+    title: clause['dcs:title'],
+    conditionIds: clauseConstraints(clause)
+      .map((c) => c['dcs:placeholder'])
+      .filter((p): p is string => !!p),
+  })),
 )
 
 function addClause(payload: { title: string; text: string }) {
-  const text = payload.text
-  if (!text.trim()) return
-  const conditionIds = conditionIdsFromText(text)
-  const draftCondition = draftDomainTypeCondition.value
-  const usesDraftCondition = !!draftCondition && conditionIds.includes(draftCondition.conditionId)
-  if (usesDraftCondition) store.semanticConditions.push(draftCondition)
+  if (!payload.text.trim()) return
   store.addClause({
-    title: payload.title.trim(),
-    text,
-    conditionIds,
-    schemaRef: usesDraftCondition ? draftDomainTypeMeta.value?.schemaRef : undefined,
-    semanticPath: usesDraftCondition ? draftDomainTypeMeta.value?.semanticPath : undefined,
+    title: payload.title.trim() || undefined,
+    content: payload.text,
   })
   newClauseTitle.value = ''
   newClauseText.value = ''
-  draftDomainTypeCondition.value = null
-  draftDomainTypeMeta.value = null
 }
 
 function startEditClause(blockId: string) {
@@ -164,47 +128,59 @@ function cancelEdit() {
 }
 
 function saveEditedClause(payload: { blockId: string; title: string; text: string }) {
-  const text = payload.text
-  const title = payload.title.trim()
-  if (!text.trim()) return
+  if (!payload.text.trim()) return
   store.updateClause(payload.blockId, {
-    title,
-    text,
-    conditionIds: conditionIdsFromText(text),
+    'dcs:title': payload.title.trim() || undefined,
+    'dcs:content': payload.text,
   })
   if (editingBlockId.value === payload.blockId) cancelEdit()
 }
 
 function deleteClause(blockId: string) {
-  store.deleteClause(blockId)
+  store.deleteSection(blockId)
   if (editingBlockId.value === blockId) cancelEdit()
 }
 
 function describeNewClauseFromDomainType(domainTypeId: string) {
   const domainType = ontologyDomainTypes.find((item) => item.id === domainTypeId)
   if (!domainType) return
-  const role = domainType.roleRequired ? (selectedDomainTypeRoles.value[domainType.id] ?? '') : ''
+  const role = domainType.roleRequired ? selectedDomainTypeRoles.value[domainType.id] ?? '' : ''
   if (domainType.roleRequired && !role) return
 
-  const conditionId = `${domainType.id}-${role || 'default'}-${crypto.randomUUID()}`
   const roleLabel = role ? roleLabelFor(role) : ''
   const title = roleLabel ? `${roleLabel} ${domainType.label}` : domainType.label
   const parameters = buildOntologyDomainTypeParameters(domainType)
-  const text = buildOntologyDomainTypeClauseText(conditionId, domainType, role)
+  const text = buildOntologyDomainTypeClauseText(domainType, role)
 
-  draftDomainTypeCondition.value = {
-    conditionId,
-    conditionName: title,
-    schemaVersion: SEMANTIC_CONDITION_SCHEMA_VERSION,
+  // Build ODRL obligation from domain type parameters.
+  const constraints: OdrlConstraint[] = parameters.map((p) => ({
+    '@type': 'odrl:Constraint',
+    'odrl:leftOperand': { '@id': p.iri },
+    'odrl:operator': { '@id': 'odrl:eq' },
+    'odrl:rightOperand': { '@value': '', '@type': 'xsd:string' },
+    'dcs:placeholder': p.placeholder,
+    'dcs:parameterType': p.type,
+    'dcs:isRequired': p.isRequired,
+    'dcs:uiLabel': p.label,
+  }))
+
+  const obligation: OdrlRule[] = constraints.length
+    ? [{
+        '@type': 'odrl:Rule',
+        'odrl:action': { '@id': 'odrl:use' },
+        ...(role ? { 'odrl:assignee': { '@id': `dcs:role:${role}` } } : {}),
+        'odrl:constraint': constraints,
+      }]
+    : []
+
+  store.addClause({
+    title,
+    content: text,
     entityType: domainType.entityType,
-    ...(role ? { entityRole: role } : {}),
-    parameters,
-  }
-  draftDomainTypeMeta.value = {
-    schemaRef: domainType.fields[0]?.schemaRef,
-    semanticPath: domainType.fields[0]?.semanticPath.split('.', 1)[0] ?? domainType.id,
-  }
-  newClauseTitle.value = title
-  newClauseText.value = text
+    obligation,
+  })
+
+  newClauseTitle.value = ''
+  newClauseText.value = ''
 }
 </script>

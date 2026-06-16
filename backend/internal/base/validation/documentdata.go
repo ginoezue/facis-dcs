@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"digital-contracting-service/internal/base/datatype"
+	"digital-contracting-service/internal/dcs"
 )
 
 type domainField struct {
@@ -69,9 +70,13 @@ func (constraint *valueConstraint) asMap() map[string]any {
 
 type documentData map[string]any
 
-// NormalizeTemplateData adds FACIS schema and policy references and validates the
-// structural shape expected by the template builder.
+// NormalizeTemplateData validates and normalises template_data.
+// Accepts dcs:ContractTemplate (new format) or legacy DocumentStructure format.
 func NormalizeTemplateData(raw *datatype.JSON) (*datatype.JSON, error) {
+	if dcs.IsTemplate(raw) {
+		return dcs.NormalizeTemplate(raw, "")
+	}
+	// Unknown format: fall through to legacy validation path.
 	data, err := decodeDocumentData(raw)
 	if err != nil {
 		return nil, err
@@ -92,9 +97,11 @@ func NormalizeTemplateData(raw *datatype.JSON) (*datatype.JSON, error) {
 	return encodeDocumentData(data)
 }
 
-// NormalizeTemplateDataForPersistence keeps stored template JSON-LD
-// self-identifying when it is read outside the relational row envelope.
+// NormalizeTemplateDataForPersistence normalises and sets the @id on a template.
 func NormalizeTemplateDataForPersistence(raw *datatype.JSON, did string) (*datatype.JSON, error) {
+	if dcs.IsTemplate(raw) {
+		return dcs.NormalizeTemplate(raw, did)
+	}
 	normalized, err := NormalizeTemplateData(raw)
 	if err != nil {
 		return nil, err
@@ -102,11 +109,12 @@ func NormalizeTemplateDataForPersistence(raw *datatype.JSON, did string) (*datat
 	return addDocumentIdentity(normalized, did)
 }
 
-// NormalizeContractData adds FACIS contract schema and policy references and
-// validates structure plus semantic values. When requireSemanticValues is false,
-// required semantic values may still be empty so a draft contract can be created
-// from a template before the creator has filled all parameters.
+// NormalizeContractData validates and normalises contract_data.
+// Accepts dcs:Contract (new format). Legacy contracts go through the old path.
 func NormalizeContractData(raw *datatype.JSON, requireSemanticValues bool) (*datatype.JSON, error) {
+	if dcs.IsContract(raw) {
+		return dcs.NormalizeContract(raw, "")
+	}
 	data, err := decodeDocumentData(raw)
 	if err != nil {
 		return nil, err
@@ -137,9 +145,11 @@ func NormalizeContractData(raw *datatype.JSON, requireSemanticValues bool) (*dat
 	return encodeDocumentData(data)
 }
 
-// NormalizeContractDataForPersistence keeps stored contract JSON-LD
-// self-identifying when it is read outside the relational row envelope.
+// NormalizeContractDataForPersistence normalises and sets the @id on a contract.
 func NormalizeContractDataForPersistence(raw *datatype.JSON, did string, requireSemanticValues bool) (*datatype.JSON, error) {
+	if dcs.IsContract(raw) {
+		return dcs.NormalizeContract(raw, did)
+	}
 	normalized, err := NormalizeContractData(raw, requireSemanticValues)
 	if err != nil {
 		return nil, err

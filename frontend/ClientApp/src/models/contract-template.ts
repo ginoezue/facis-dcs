@@ -18,7 +18,6 @@ import type {
   SemanticRule,
   SLAAgreement,
 } from './semantic/facis-dcs-semantic'
-
 export interface ContractTemplate {
   did: string
   created_by: string
@@ -36,6 +35,7 @@ export interface ContractTemplate {
 
 export type PartialContractTemplate = ContractTemplate
 
+/** Legacy DocumentStructure-based template data (old format). */
 export interface ContractTemplateData {
   '@context'?: string
   documentOutline: DocumentOutline
