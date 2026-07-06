@@ -59,13 +59,26 @@ Feature: Contract state machine refactor — Offer, Withdraw, and the extended t
     And the contract "Invalid Transition UI Path" is in state "DRAFT"
 
   # NOTE: the peer-action entry path (`POST /peer/contracts/action`) requires
-  # did:web peer-trust seeding (hostname resolution + eIDAS cert chain +
-  # signed-secret challenge) that does not exist in this single-instance BDD
-  # harness (docs/anforderung.md: "peer trust seeding ... missing"). This
-  # scenario can therefore only prove the endpoint rejects the request overall
-  # — it cannot isolate the state-machine's own rejection from a peer-auth
-  # rejection. Full coverage of this entry path needs the two-instance runner
-  # mentioned in docs/anforderung.md item "offer_withdraw.feature".
+  # a successful did:web challenge-response handshake (hostname resolution +
+  # eIDAS check + signature verify, see backend/internal/service/dcs_to_dcs.go
+  # Action()) before the transition table is ever reached. A genuine
+  # two-instance peer isn't available in this single-instance BDD harness
+  # (docs/anforderung.md: two-instance runner still missing), so this
+  # scenario instead simulates a trusted peer by having the instance
+  # authenticate as its own did:web identity (checked-in dev DID/key pair,
+  # backend/certs/dev/did-8991.json + signing-8991.key, or the 8992
+  # counterpart — see steps/template_management/contract_state_machine_steps.py
+  # _self_peer_action_credentials). Because the contract under test is also
+  # created locally (Origin == this same DID), Approver.Handle's
+  # single-writer forwarding check is a no-op and the exact same
+  # `contractstate.ValidateTransition` the UI-API path hits is reached
+  # directly — so this scenario's rejection genuinely evidences the
+  # transition table, not a peer-auth failure (the Then step asserts the
+  # error message names the transition rejection, not an auth error).
+  # This still doesn't exercise cross-operator peer trust (did:web hostname
+  # resolution across two independently-run instances, a real
+  # eIDAS-certificate-chain check, or the local trusted_peers allowlist) —
+  # that remains the two-instance runner's job.
   @REQ-contract-state-machine-refactor-AC4 @DCS-IR-CWE-05 @DCS-IR-CWE-06 @DCS-IR-CWE-07 @DCS-IR-CWE-08 @DCS-IR-CWE-09 @DCS-IR-CWE-10 @SRS-3.1.1
   Scenario: Approve on a draft contract is rejected via the peer-action entry path
     Given contract "Invalid Transition Peer Path" is in "Draft" status

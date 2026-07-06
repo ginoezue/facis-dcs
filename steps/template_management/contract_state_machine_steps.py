@@ -15,10 +15,15 @@ refactor itself.
 """
 
 import base64
-import hashlib
+import re
+import uuid
+from pathlib import Path
+from urllib.parse import unquote
 
 import requests as _requests
 from behave import given, then, when
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 from steps.support.api_client import (
     contract_approve_url,
@@ -49,6 +54,108 @@ def _seed_headers(context, name):
     if name in seed:
         return seed[name]
     return getattr(context, "headers", None)
+
+
+def _repo_root() -> Path:
+    # This file lives at steps/template_management/<this file>.py.
+    return Path(__file__).resolve().parents[2]
+
+
+def _did_web_to_hostname(did: str) -> str:
+    """Mirror identity.DIDWebToHostname (backend/internal/base/identity/did.go)
+    so the BDD client can resolve exactly the hostname:port the server itself
+    will resolve when it later verifies this signature server-side.
+    """
+    prefix = "did:web:"
+    assert did.startswith(prefix), f"not a did:web identifier: {did}"
+    rest = did[len(prefix):]
+    host_encoded = rest.split(":", 1)[0]
+    assert host_encoded, f"did:web identifier has empty host component: {did}"
+    return unquote(host_encoded)
+
+
+def _dev_signing_key_path(hostname: str) -> Path:
+    """Map a did:web hostname (e.g. 'localhost:8991') to the matching
+    checked-in dev private key (backend/certs/dev/signing-<port>.key) — the
+    same DID/key pairing backend/.env.dev1 (port 8991) and backend/.env.dev2
+    (port 8992) use for the local dev-stack.sh instances. Only these two
+    known dev ports are supported: this is a self-peer simulation, not a
+    generic did:web resolver, and only works because we control the matching
+    private key for the instance under test.
+    """
+    match = re.search(r":(\d+)$", hostname)
+    assert match, (
+        f"cannot derive a dev signing key for did:web hostname '{hostname}' "
+        "(expected '<host>:<port>', e.g. 'localhost:8991')"
+    )
+    port = match.group(1)
+    key_path = _repo_root() / "backend" / "certs" / "dev" / f"signing-{port}.key"
+    assert key_path.is_file(), (
+        f"no checked-in dev signing key at '{key_path}' for did:web port {port} — "
+        "the peer-path self-simulation in this scenario only supports the "
+        "checked-in backend/.env.dev1 (8991) / backend/.env.dev2 (8992) dev "
+        "identities (backend/certs/dev/did-8991.json, did-8992.json). If this "
+        "DCS instance runs under a different DCS_DID (e.g. the Helm/kind BDD "
+        "harness, which currently sets no DCS_DID/DCS_PRIVATE_KEY at all — see "
+        "docs/anforderung.md), the peer-path part of AC4 cannot be proven this "
+        "way and needs re-scoping with the analyst (e.g. grep-gate/manual-drill "
+        "for that entry path, or a real two-instance runner)."
+    )
+    return key_path
+
+
+def _sign_secret_value_with_dev_key(key_path: Path, secret_value: str) -> bytes:
+    """RSA-PSS(SHA-256) signature matching DIDDocument.Sign (backend/internal/
+    base/identity/did.go): Go's rsa.SignPSS is called with nil *PSSOptions,
+    which defaults the salt length to "auto" (the maximum possible length for
+    signing) — i.e. padding.PSS.MAX_LENGTH here. Go's verify side auto-detects
+    the salt length regardless, so this is compatible either way.
+    """
+    private_key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+    return private_key.sign(
+        secret_value.encode(),
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+        hashes.SHA256(),
+    )
+
+
+def _self_peer_action_credentials(context):
+    """Simulate a trusted peer by fetching this DCS instance's own did:web
+    document (public, unauthenticated GET /.well-known/did.json — see
+    backend/design/did.go) and signing a fresh secret with the matching
+    checked-in dev private key. The peer action endpoint
+    (backend/internal/service/dcs_to_dcs.go Action()) then does a real,
+    successful did:web challenge-response verification against this
+    instance's own identity, instead of failing on an unresolvable/invalid
+    peer hostname before ever reaching the transition-table check.
+
+    This only proves AC4's peer-path claim because the contract under test
+    was also created locally on this same instance (Origin == this DID):
+    Approver.Handle's single-writer-per-aggregate forwarding check
+    (`processData.Origin != localPeer`) is therefore a no-op, and the very
+    same `contractstate.ValidateTransition` the UI-API path hits is reached
+    directly — see backend/internal/contractworkflowengine/command/approve.go.
+    """
+    did_resp = _requests.get(
+        f"{context.base_url}/.well-known/did.json",
+        timeout=context.http_timeout_seconds,
+    )
+    assert did_resp.status_code == 200, (
+        f"could not fetch this instance's own did:web document from "
+        f"{context.base_url}/.well-known/did.json (required to simulate a "
+        f"trusted peer): {did_resp.status_code} {did_resp.text}"
+    )
+    from_peer_did = did_resp.json().get("id")
+    assert from_peer_did, f"own did.json response has no 'id' field: {did_resp.text}"
+
+    hostname = _did_web_to_hostname(from_peer_did)
+    key_path = _dev_signing_key_path(hostname)
+
+    secret_value = str(uuid.uuid4())
+    signature = _sign_secret_value_with_dev_key(key_path, secret_value)
+    secret_hash = base64.b64encode(signature).decode()
+
+    return from_peer_did, secret_value, secret_hash
 
 
 def _offer_contract(context, name):
@@ -254,12 +361,14 @@ def step_when_apply_signature(context, name):
 @when('a peer attempts to approve contract "{name}" via the peer action endpoint')
 def step_when_peer_attempts_approve(context, name):
     did, updated_at = ContractService._contract_data(context, name)
-    secret_value = "bdd-peer-secret"
-    secret_hash = base64.b64encode(hashlib.sha256(secret_value.encode()).digest()).decode()
+    # Simulate a trusted, successfully-authenticated peer (see
+    # _self_peer_action_credentials docstring) so a 4xx/5xx here can only be
+    # the transition-table rejection itself, not a did:web auth failure.
+    from_peer_did, secret_value, secret_hash = _self_peer_action_credentials(context)
     payload = {
         "action": "approve",
         "component": "ContractWorkflowEngine",
-        "from_peer_did": "did:web:bdd-peer.invalid",
+        "from_peer_did": from_peer_did,
         "payload": {"did": did, "updated_at": updated_at},
         "secret_value": secret_value,
         "secret_hash": secret_hash,
@@ -324,9 +433,23 @@ def step_then_denied_client_error(context):
 
 @then("the peer action request fails")
 def step_then_peer_action_fails(context):
-    assert context.requests_response.status_code != 200, (
+    resp = context.requests_response
+    assert resp.status_code != 200, (
         "Expected the invalid transition attempted via the peer action endpoint to "
-        f"fail, got 200: {context.requests_response.text}"
+        f"fail, got 200: {resp.text}"
+    )
+    # The peer-auth handshake (did:web fetch + eIDAS check + challenge-response
+    # verify, see backend/internal/service/dcs_to_dcs.go Action()) is simulated
+    # as succeeding (see _self_peer_action_credentials), so a failure here can
+    # only honestly evidence AC4's peer-path claim if it is the same
+    # contractstate.ValidateTransition rejection the UI-API path hits — not a
+    # did:web auth error that happens to also return a non-200.
+    body_text = resp.text.lower()
+    assert "transition" in body_text or "not allowed" in body_text, (
+        "Expected the peer action to fail because of the invalid state "
+        "transition itself (backend/internal/contractworkflowengine/datatype/"
+        "contractstate ErrInvalidTransition), not a did:web peer-auth error — "
+        f"got {resp.status_code}: {resp.text}"
     )
 
 
