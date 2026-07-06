@@ -45,6 +45,34 @@ def contract_verify_url(context) -> str:
     return f"{context.base_url}/contract/verify"
 
 
+def contract_offer_url(context) -> str:
+    return f"{context.base_url}/contract/offer"
+
+
+def contract_withdraw_url(context) -> str:
+    return f"{context.base_url}/contract/withdraw"
+
+
+def contract_terminate_url(context) -> str:
+    return f"{context.base_url}/contract/terminate"
+
+
+def contract_search_url(context) -> str:
+    return f"{context.base_url}/contract/search"
+
+
+def contract_audit_url(context) -> str:
+    return f"{context.base_url}/contract/audit"
+
+
+def contract_peer_action_url(context) -> str:
+    return f"{context.base_url}/peer/contracts/action"
+
+
+def signature_apply_url(context) -> str:
+    return f"{context.base_url}/signature/apply"
+
+
 def template_create_url(context) -> str:
     return f"{context.base_url}/template/create"
 
