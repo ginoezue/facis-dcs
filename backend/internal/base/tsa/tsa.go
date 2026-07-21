@@ -32,6 +32,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -54,12 +55,37 @@ var embeddedTSACert = func() *x509.Certificate {
 	return cert
 }()
 
+// loadTrustedTSACertificate resolves the trust anchor after application
+// configuration has been loaded. In local development main loads .env after
+// Go package initialization, so reading TSA_TRUST_CERT_FILE in a package-level
+// initializer would silently ignore the configured ORCE certificate.
+func loadTrustedTSACertificate() (*x509.Certificate, error) {
+	path := strings.TrimSpace(os.Getenv("TSA_TRUST_CERT_FILE"))
+	if path == "" {
+		return embeddedTSACert, nil
+	}
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("TSA_TRUST_CERT_FILE %s is unreadable: %w", path, err)
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, fmt.Errorf("TSA_TRUST_CERT_FILE does not contain a PEM certificate: %s", path)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse TSA_TRUST_CERT_FILE %s: %w", path, err)
+	}
+	return cert, nil
+}
+
 // APIClient sends timestamp requests to an RFC 3161 TSA HTTP endpoint.
 type APIClient struct {
 	// url is the base URL of the TSA endpoint. The hex-encoded hash of the
 	// payload is appended to this URL for each request.
-	url    string
-	client *http.Client
+	url         string
+	client      *http.Client
+	trustedCert *x509.Certificate
 }
 
 type Receipt struct {
@@ -75,11 +101,16 @@ type Receipt struct {
 // NewClient creates a new [APIClient] for the given TSA endpoint URL.
 // url must end with a path separator so that the hash can be appended directly
 func NewClient(url string) (*APIClient, error) {
+	trustedCert, err := loadTrustedTSACertificate()
+	if err != nil {
+		return nil, fmt.Errorf("load TSA trust certificate: %w", err)
+	}
 	return &APIClient{
 		url: strings.TrimSpace(url),
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		trustedCert: trustedCert,
 	}, nil
 }
 
@@ -145,6 +176,13 @@ func VerifyReceipt(receipt Receipt, data []byte) (*timestamp.Timestamp, error) {
 	return ts, nil
 }
 
+// tsaRequestAttempts bounds the retries for one timestamp request. The
+// upstream TSA (reached via ORCE) is an external service that intermittently
+// drops or throttles requests; the request is an idempotent hash-keyed GET,
+// so a short bounded retry absorbs transient failures without masking a real
+// outage — after the last attempt the error still propagates.
+const tsaRequestAttempts = 3
+
 func requestTimestampToken(ctx context.Context, httpClient *http.Client, tsaURL string, data []byte) ([]byte, *timestamp.Timestamp, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -153,32 +191,13 @@ func requestTimestampToken(ctx context.Context, httpClient *http.Client, tsaURL 
 	hash := sha256.Sum256(data)
 	hashString := hex.EncodeToString(hash[:])
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, timestampURL(tsaURL, hashString), nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create TSA HTTP request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "text/plain")
-	httpReq.Header.Set("Accept", "application/timestamp-reply")
-
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		return nil, nil, fmt.Errorf("call TSA endpoint: %w", err)
-	}
-	defer func(Body io.ReadCloser) {
-		if err := Body.Close(); err != nil {
-			log.Println("could not close body")
-		}
-	}(httpResp.Body)
 
-	body, err := io.ReadAll(httpResp.Body)
+	body, err := fetchTimestampResponse(ctx, httpClient, timestampURL(tsaURL, hashString))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read TSA response: %w", err)
-	}
-	if httpResp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("unexpected TSA status %d: %s", httpResp.StatusCode, string(body))
+		return nil, nil, err
 	}
 
 	ts, err := timestamp.Parse(body)
@@ -197,6 +216,57 @@ func requestTimestampToken(ctx context.Context, httpClient *http.Client, tsaURL 
 	}
 
 	return ts.RawToken, ts, nil
+}
+
+func fetchTimestampResponse(ctx context.Context, httpClient *http.Client, url string) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= tsaRequestAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("call TSA endpoint: %w", ctx.Err())
+			case <-time.After(time.Duration(attempt-1) * 2 * time.Second):
+			}
+		}
+		body, retryable, err := doTimestampRequest(ctx, httpClient, url)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		if !retryable || ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+func doTimestampRequest(ctx context.Context, httpClient *http.Client, url string) (body []byte, retryable bool, err error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("create TSA HTTP request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "text/plain")
+	httpReq.Header.Set("Accept", "application/timestamp-reply")
+
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return nil, true, fmt.Errorf("call TSA endpoint: %w", err)
+	}
+	defer func(Body io.ReadCloser) {
+		if err := Body.Close(); err != nil {
+			log.Println("could not close body")
+		}
+	}(httpResp.Body)
+
+	body, err = io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, true, fmt.Errorf("read TSA response: %w", err)
+	}
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, httpResp.StatusCode >= http.StatusInternalServerError,
+			fmt.Errorf("unexpected TSA status %d: %s", httpResp.StatusCode, string(body))
+	}
+	return body, false, nil
 }
 
 func timestampURL(baseURL, hash string) string {
@@ -240,6 +310,23 @@ func receiptFromTimestamp(token []byte, ts *timestamp.Timestamp) *Receipt {
 // its SHA-256 hash, and compares it against the hash inside the TSR.
 // Returns (true, nil) on success, (false, err) on any failure.
 func Verify(tsrBase64 string, data any) (bool, error) {
+	trustedCert, err := loadTrustedTSACertificate()
+	if err != nil {
+		return false, fmt.Errorf("load TSA trust certificate: %w", err)
+	}
+	return verifyWithCertificate(tsrBase64, data, trustedCert)
+}
+
+// Verify checks a timestamp using the trust anchor captured when the client
+// was created, after the application's environment configuration was loaded.
+func (c *APIClient) Verify(tsrBase64 string, data any) (bool, error) {
+	if c == nil || c.trustedCert == nil {
+		return false, fmt.Errorf("TSA client has no trust certificate")
+	}
+	return verifyWithCertificate(tsrBase64, data, c.trustedCert)
+}
+
+func verifyWithCertificate(tsrBase64 string, data any, trustedCert *x509.Certificate) (bool, error) {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return false, fmt.Errorf("marshal data: %w", err)
@@ -268,10 +355,10 @@ func Verify(tsrBase64 string, data any) (bool, error) {
 		return false, fmt.Errorf("TSR hash mismatch")
 	}
 
-	// Verify the TSA's cryptographic signature using the embedded certificate.
-	// embeddedTSACert was parsed from certs/tsa.crt at package init time.
+	// Verify the TSA's cryptographic signature against the trusted TSA
+	// certificate (embedded default or TSA_TRUST_CERT_FILE override).
 	pool := x509.NewCertPool()
-	pool.AddCert(embeddedTSACert)
+	pool.AddCert(trustedCert)
 	p7, err := pkcs7.Parse(ts.RawToken)
 	if err != nil {
 		return false, fmt.Errorf("parse TSR token: %w", err)

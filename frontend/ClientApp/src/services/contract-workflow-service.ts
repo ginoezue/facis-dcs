@@ -7,6 +7,7 @@ import type {
   ContractHistoryRetrieveRequest,
   ContractNegotiationRequest,
   ContractNegotiationRespondRequest,
+  ContractOfferRequest,
   ContractRejectRequest,
   ContractRetrieveByIdRequest,
   ContractRetrieveRequest,
@@ -26,6 +27,7 @@ import type {
   ContractHistoryResponse,
   ContractNegotiationRespondResponse,
   ContractNegotiationResponse,
+  ContractOfferResponse,
   ContractRejectResponse,
   ContractRetrieveByIdResponse,
   ContractRetrieveResponse,
@@ -45,6 +47,10 @@ export const contractWorkflowService: ContractWorkflowService = {
 
   async update(request: ContractUpdateRequest) {
     return http.put<ContractUpdateResponse>('/contract/update', request).then((res) => res.data)
+  },
+
+  async offer(request: ContractOfferRequest) {
+    return http.post<ContractOfferResponse>('/contract/offer', request).then((res) => res.data)
   },
 
   async submit(request: ContractSubmitRequest) {
@@ -151,6 +157,12 @@ export const contractWorkflowService: ContractWorkflowService = {
   async exportPdf(did: string): Promise<Blob> {
     return http
       .get<Blob>(`/pdf/export/contract/${encodeURIComponent(did)}`, { responseType: 'blob' })
+      .then((res) => res.data)
+  },
+
+  async exportBundle(did: string): Promise<Blob> {
+    return http
+      .get<Blob>(`/contract/export/${encodeURIComponent(did)}`, { responseType: 'blob' })
       .then((res) => res.data)
   },
 

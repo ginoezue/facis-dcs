@@ -7,6 +7,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,15 +24,15 @@ import (
 	contractworkflowenginesvr "digital-contracting-service/gen/http/contract_workflow_engine/server"
 	dcstodcssvr "digital-contracting-service/gen/http/dcs_to_dcs/server"
 	didsvr "digital-contracting-service/gen/http/did_service/server"
-	internalsigningsvr "digital-contracting-service/gen/http/internal_signing/server"
 	pdfgenerationsvr "digital-contracting-service/gen/http/pdf_generation/server"
 	processauditandcompliancesvr "digital-contracting-service/gen/http/process_audit_and_compliance/server"
+	semantichubsvr "digital-contracting-service/gen/http/semantic_hub/server"
 	signaturemanagementsvr "digital-contracting-service/gen/http/signature_management/server"
 	templatecatalogueintegrationsvr "digital-contracting-service/gen/http/template_catalogue_integration/server"
 	templaterepositorysvr "digital-contracting-service/gen/http/template_repository/server"
-	internalsigning "digital-contracting-service/gen/internal_signing"
 	pdfgeneration "digital-contracting-service/gen/pdf_generation"
 	processauditandcompliance "digital-contracting-service/gen/process_audit_and_compliance"
+	semantichubgen "digital-contracting-service/gen/semantic_hub"
 	signaturemanagement "digital-contracting-service/gen/signature_management"
 	templatecatalogueintegration "digital-contracting-service/gen/template_catalogue_integration"
 	templaterepository "digital-contracting-service/gen/template_repository"
@@ -54,6 +55,23 @@ import (
 
 type formRequestDecoder struct {
 	r *http.Request
+}
+
+type rawBytesEncoder struct {
+	fallback goahttp.Encoder
+	w        http.ResponseWriter
+}
+
+func (e rawBytesEncoder) Encode(value any) error {
+	if data, ok := value.([]byte); ok {
+		_, err := e.w.Write(data)
+		return err
+	}
+	return e.fallback.Encode(value)
+}
+
+func responseEncoder(ctx context.Context, w http.ResponseWriter) goahttp.Encoder {
+	return rawBytesEncoder{fallback: goahttp.ResponseEncoder(ctx, w), w: w}
 }
 
 func (d *formRequestDecoder) Decode(v any) error {
@@ -117,7 +135,7 @@ func handleHTTPServer(ctx context.Context, u *url.URL, authEndpoints *genauth.En
 	contractStorageArchiveEndpoints *contractstoragearchive.Endpoints, contractWorkflowEngineEndpoints *contractworkflowengine.Endpoints,
 	dcsToDcsEndpoints *dcstodcs.Endpoints, pdfGenerationEndpoints *pdfgeneration.Endpoints, processAuditAndComplianceEndpoints *processauditandcompliance.Endpoints,
 	signatureManagementEndpoints *signaturemanagement.Endpoints, templateCatalogueIntegrationEndpoints *templatecatalogueintegration.Endpoints,
-	templateRepositoryEndpoints *templaterepository.Endpoints, didEnpoints *didservice.Endpoints, c2paEndpoints *c2paservice.Endpoints, internalSigningEndpoints *internalsigning.Endpoints, webhookPlatform *webhookplatform.Platform, wg *sync.WaitGroup,
+	templateRepositoryEndpoints *templaterepository.Endpoints, didEnpoints *didservice.Endpoints, c2paEndpoints *c2paservice.Endpoints, semanticHubEndpoints *semantichubgen.Endpoints, webhookPlatform *webhookplatform.Platform, wg *sync.WaitGroup,
 	errc chan error, dbg bool) {
 
 	// Provide the transport specific request decoder and response encoder.
@@ -126,7 +144,7 @@ func handleHTTPServer(ctx context.Context, u *url.URL, authEndpoints *genauth.En
 	// see goa.design/implement/encoding.
 	var (
 		dec = requestDecoderWithForm
-		enc = goahttp.ResponseEncoder
+		enc = responseEncoder
 	)
 
 	// Build the service HTTP request multiplexer and mount debug and profiler
@@ -160,7 +178,7 @@ func handleHTTPServer(ctx context.Context, u *url.URL, authEndpoints *genauth.En
 		templateRepositoryServer           *templaterepositorysvr.Server
 		didServer                          *didsvr.Server
 		c2paServer                         *c2pasvr.Server
-		internalSigningServer              *internalsigningsvr.Server
+		semanticHubServer                  *semantichubsvr.Server
 	)
 	{
 		eh := errorHandler(ctx)
@@ -176,12 +194,11 @@ func handleHTTPServer(ctx context.Context, u *url.URL, authEndpoints *genauth.En
 		templateRepositoryServer = templaterepositorysvr.New(templateRepositoryEndpoints, apiMux, dec, enc, eh, ef)
 		didServer = didsvr.New(didEnpoints, apiMux, dec, enc, eh, ef)
 		c2paServer = c2pasvr.New(c2paEndpoints, apiMux, dec, enc, eh, ef)
-		internalSigningServer = internalsigningsvr.New(internalSigningEndpoints, apiMux, dec, enc, eh, ef)
+		semanticHubServer = semantichubsvr.New(semanticHubEndpoints, apiMux, dec, enc, eh, ef)
 	}
 
 	didsvr.Mount(mux, didServer)
 	c2pasvr.Mount(apiMux, c2paServer)
-	internalsigningsvr.Mount(apiMux, internalSigningServer)
 
 	// Configure the mux.
 	authsvr.Mount(apiMux, authServer)
@@ -193,6 +210,7 @@ func handleHTTPServer(ctx context.Context, u *url.URL, authEndpoints *genauth.En
 	signaturemanagementsvr.Mount(apiMux, signatureManagementServer)
 	templatecatalogueintegrationsvr.Mount(apiMux, templateCatalogueIntegrationServer)
 	templaterepositorysvr.Mount(apiMux, templateRepositoryServer)
+	semantichubsvr.Mount(apiMux, semanticHubServer)
 
 	// Mount Swagger UI on /swagger and OpenAPI spec on /openapi3.json.
 	mountSwaggerUI(apiMux)
@@ -207,6 +225,7 @@ func handleHTTPServer(ctx context.Context, u *url.URL, authEndpoints *genauth.En
 	outerMux.Handle("/", mux)
 
 	var handler http.Handler = outerMux
+	handler = reportContentTypeMiddleware(handler)
 	handler = service.RequestContextMiddleware(handler)
 	handler = middleware.InjectIP(handler)
 	handler = metricsMiddleware(handler)
@@ -246,13 +265,13 @@ func handleHTTPServer(ctx context.Context, u *url.URL, authEndpoints *genauth.En
 	for _, m := range templateRepositoryServer.Mounts {
 		log.Printf(ctx, "HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
 	}
+	for _, m := range semanticHubServer.Mounts {
+		log.Printf(ctx, "HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
+	}
 	for _, m := range didServer.Mounts {
 		log.Printf(ctx, "HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
 	}
 	for _, m := range c2paServer.Mounts {
-		log.Printf(ctx, "HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
-	}
-	for _, m := range internalSigningServer.Mounts {
 		log.Printf(ctx, "HTTP %q mounted on %s %s", m.Method, m.Verb, m.Pattern)
 	}
 
@@ -278,6 +297,22 @@ func handleHTTPServer(ctx context.Context, u *url.URL, authEndpoints *genauth.En
 			log.Printf(ctx, "failed to shutdown: %v", err)
 		}
 	}()
+}
+
+func reportContentTypeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/pac/report") && r.Method == http.MethodGet {
+			switch strings.ToLower(r.URL.Query().Get("format")) {
+			case "csv":
+				w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+			case "pdf":
+				w.Header().Set("Content-Type", "application/pdf")
+			default:
+				w.Header().Set("Content-Type", "application/json")
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // errorHandler returns a function that writes and logs the given error.

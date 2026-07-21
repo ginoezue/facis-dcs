@@ -11,7 +11,7 @@ import (
 // features/03_contract_creation/contract_state_machine_refactor.feature
 // exercise the same rules end-to-end.
 func TestOfferAndWithdrawTransitions(t *testing.T) {
-	// AC1: DRAFT -> OFFERED via Offer.
+	// DRAFT -> OFFERED via Offer.
 	if err := ValidateTransition(Draft, EventOffer); err != nil {
 		t.Fatalf("expected Offer to be allowed from Draft, got: %v", err)
 	}
@@ -19,7 +19,7 @@ func TestOfferAndWithdrawTransitions(t *testing.T) {
 		t.Fatalf("expected Draft -Offer-> Offered to be a declared outcome")
 	}
 
-	// AC2: Withdraw must succeed from OFFERED/NEGOTIATION/SUBMITTED/REVIEWED.
+	// Withdraw must succeed from OFFERED/NEGOTIATION/SUBMITTED/REVIEWED.
 	for _, from := range []ContractState{Offered, Negotiation, Submitted, Reviewed} {
 		if err := ValidateTransition(from, EventWithdraw); err != nil {
 			t.Fatalf("expected Withdraw to be allowed from %s, got: %v", from, err)
@@ -29,7 +29,7 @@ func TestOfferAndWithdrawTransitions(t *testing.T) {
 		}
 	}
 
-	// AC3: Withdraw must be rejected once APPROVED.
+	// Withdraw must be rejected once APPROVED.
 	err := ValidateTransition(Approved, EventWithdraw)
 	if err == nil {
 		t.Fatalf("expected Withdraw from Approved to be rejected")
@@ -38,13 +38,13 @@ func TestOfferAndWithdrawTransitions(t *testing.T) {
 		t.Fatalf("expected ErrInvalidTransition, got: %v", err)
 	}
 
-	// AC4: Approve is rejected from Draft.
+	// Approve is rejected from Draft.
 	err = ValidateTransition(Draft, EventApprove)
 	if err == nil || !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("expected Approve from Draft to be rejected with ErrInvalidTransition, got: %v", err)
 	}
 
-	// AC5/AC6: the pre-existing Submit -> Reviewed -> Approve -> Sign path
+	// The pre-existing Submit -> Reviewed -> Approve -> Sign path
 	// still works under the new table.
 	if err := ValidateTransition(Submitted, EventSubmit); err != nil {
 		t.Fatalf("expected Submit to remain allowed from Submitted, got: %v", err)
@@ -61,7 +61,7 @@ func TestOfferAndWithdrawTransitions(t *testing.T) {
 }
 
 // TestSubmitAllowedFromOffered covers the C1-C3 two-instance-peer-trust
-// gap found while writing AC8 of features/17_peer_trust: the documented
+// gap surfaced by features/17_peer_trust's replication scenarios: the documented
 // sequence DRAFT -> OFFERED -> NEGOTIATION -> SUBMITTED -> ... requires an
 // Offered -Submit-> Negotiation edge, analogous to the pre-existing
 // Draft -Submit-> Negotiation edge.
@@ -96,6 +96,48 @@ func TestTerminateAllowedFromEveryNonTerminalState(t *testing.T) {
 
 	if EventAllowed(Terminated, EventTerminate) {
 		t.Fatalf("expected Terminate to be rejected once already Terminated")
+	}
+}
+
+// TestDeployAllowedFromSignedAndActive: signing completion auto-deploys and
+// the real contract target acknowledges within moments (DCS-FR-CWE-06/SM-12),
+// so a manual /contract/deploy — and the second ack it produces — must stay
+// valid for an already-activated contract (idempotent ACTIVE -> ACTIVE
+// re-dispatch). Deploy remains rejected from every pre-signing state.
+func TestDeployAllowedFromSignedAndActive(t *testing.T) {
+	if err := ValidateTransition(Signed, EventDeploy); err != nil {
+		t.Fatalf("expected Deploy to be allowed from Signed, got: %v", err)
+	}
+	if !IsAllowed(Signed, EventDeploy, Active) {
+		t.Fatalf("expected Signed -Deploy-> Active to be a declared outcome")
+	}
+	if err := ValidateTransition(Active, EventDeploy); err != nil {
+		t.Fatalf("expected Deploy to be allowed from Active (idempotent re-dispatch), got: %v", err)
+	}
+	if !IsAllowed(Active, EventDeploy, Active) {
+		t.Fatalf("expected Active -Deploy-> Active to be a declared outcome")
+	}
+	for _, from := range []ContractState{Draft, Offered, Negotiation, Submitted, Reviewed, Approved, Terminated} {
+		if err := ValidateTransition(from, EventDeploy); err == nil {
+			t.Fatalf("expected Deploy from %s to be rejected", from)
+		}
+	}
+}
+
+// TestSignReentryFromSigned: a further signatory on a multi-signer contract
+// signs from SIGNED (DCS-FR-SM-07/-17); the pre-signing states still reject
+// Sign except Approved.
+func TestSignReentryFromSigned(t *testing.T) {
+	if err := ValidateTransition(Signed, EventSign); err != nil {
+		t.Fatalf("expected Sign to be allowed from Signed (multi-signer re-entry), got: %v", err)
+	}
+	if !IsAllowed(Signed, EventSign, Signed) {
+		t.Fatalf("expected Signed -Sign-> Signed to be a declared outcome")
+	}
+	for _, from := range []ContractState{Draft, Offered, Negotiation, Submitted, Reviewed, Active, Terminated} {
+		if err := ValidateTransition(from, EventSign); err == nil {
+			t.Fatalf("expected Sign from %s to be rejected", from)
+		}
 	}
 }
 

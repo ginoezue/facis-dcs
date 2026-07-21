@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { signatureManagementService, type CeremonyStatus } from '@/services/signature-management-service'
 import { useConfirmDialog } from '@vueuse/core'
 import { useQRCode } from '@vueuse/integrations/useQRCode'
 import { computed, ref, useTemplateRef, watch } from 'vue'
+import { type CeremonyStatus, signatureManagementService } from '@/services/signature-management-service'
 
 interface CeremonyRequest {
   contractDid: string
@@ -22,11 +22,15 @@ const phase = ref<'starting' | CeremonyStatus>('starting')
 const walletUri = ref('')
 const errorMessage = ref('')
 const qrCodeDataUrl = useQRCode(computed(() => walletUri.value || ''))
+const copyHint = ref('')
 
 let ceremonyId = ''
 let pollTimer: ReturnType<typeof setInterval> | undefined
 
-const { isRevealed, reveal, confirm, cancel, onReveal } = useConfirmDialog<CeremonyRequest, CeremonyResult | undefined>()
+const { isRevealed, reveal, confirm, cancel, onReveal } = useConfirmDialog<
+  CeremonyRequest,
+  CeremonyResult | undefined
+>()
 
 onReveal((data) => {
   if (data) request.value = data
@@ -58,6 +62,7 @@ async function startCeremony() {
     const started = await signatureManagementService.startCeremony(request.value.contractDid, request.value.fieldName)
     ceremonyId = started.ceremony_id
     walletUri.value = started.wallet_uri
+    copyHint.value = ''
     phase.value = 'pending'
     pollTimer = setInterval(() => void pollStatus(), POLL_INTERVAL_MS)
   } catch (e: unknown) {
@@ -80,6 +85,12 @@ async function pollStatus() {
   } catch {
     // Transient poll failures are ignored; the interval retries on the next tick.
   }
+}
+
+async function copyWalletUri() {
+  if (!walletUri.value) return
+  await navigator.clipboard.writeText(walletUri.value)
+  copyHint.value = 'Link copied.'
 }
 
 function retry() {
@@ -110,21 +121,20 @@ defineExpose<DialogExpose>({ reveal })
         </div>
 
         <div v-else-if="phase === 'pending'" class="flex flex-col items-center gap-3">
-          <p class="text-sm opacity-80">Scan the QR code with your wallet to present your PID and sign.</p>
+          <p class="text-sm opacity-80">
+            Scan the QR code with your wallet to present your PID and Power of Attorney, then sign.
+          </p>
           <figure class="rounded-box bg-white p-3">
-            <img
-              v-if="qrCodeDataUrl"
-              :src="qrCodeDataUrl"
-              alt="Signing ceremony QR code"
-              class="mx-auto h-48 w-48"
-            />
+            <img v-if="qrCodeDataUrl" :src="qrCodeDataUrl" alt="Signing ceremony QR code" class="mx-auto h-48 w-48" />
           </figure>
+          <button type="button" class="btn btn-sm btn-primary" @click="copyWalletUri">Copy link</button>
+          <p v-if="copyHint" class="text-sm text-warning">{{ copyHint }}</p>
           <p class="text-xs opacity-70">Waiting for the wallet presentation…</p>
         </div>
 
         <div v-else-if="phase === 'expired' || phase === 'failed'" class="flex flex-col items-center gap-3 py-2">
           <p class="text-sm text-error">
-            {{ phase === 'expired' ? 'The signing ceremony expired.' : (errorMessage || 'The signing ceremony failed.') }}
+            {{ phase === 'expired' ? 'The signing ceremony expired.' : errorMessage || 'The signing ceremony failed.' }}
           </p>
           <button type="button" class="btn btn-sm btn-primary" @click="retry">Start a new ceremony</button>
         </div>

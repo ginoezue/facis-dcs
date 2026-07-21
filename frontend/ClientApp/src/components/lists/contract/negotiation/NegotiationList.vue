@@ -1,12 +1,12 @@
 <script setup lang="ts">
+import { computed, ref, useTemplateRef } from 'vue'
 import ConfirmationModal from '@/components/ConfirmationModal.vue'
-import type { Contract } from '@/models/contract/contract'
-import type { ContractNegotiation } from '@/models/contract/contract-negotiation'
-import type { ContractNegotiationDecision } from '@/models/contract/contract-negotiation-decision'
 import { useContractPermissions } from '@/modules/contract-workflow-engine/composables/useContractPermissions'
 import { contractWorkflowService } from '@/services/contract-workflow-service'
 import { useAuthStore } from '@/stores/auth-store'
-import { computed, ref, useTemplateRef } from 'vue'
+import type { Contract } from '@/models/contract/contract'
+import type { ContractNegotiation } from '@/models/contract/contract-negotiation'
+import type { ContractNegotiationDecision } from '@/models/contract/contract-negotiation-decision'
 
 const props = defineProps<{
   contract: Contract
@@ -97,7 +97,12 @@ const rejectNegotiation = async (negotiation: ContractNegotiation) => {
 
 const isBtnDisabled = (negotiation: ContractNegotiation) => {
   const decision = negotiation.negotiation_decisions.find((decision) => decision.negotiator === issuer.value)
-  return decision?.decision !== undefined
+  // Disable only once THIS negotiator has actually decided. A pending decision
+  // carries a null decision, and `!== undefined` classed that as decided — so
+  // the very decision the user still owes disabled its own Accept/Reject, and
+  // the round deadlocked: the open decision kept Submit disabled with no way to
+  // resolve it.
+  return decision?.decision != null
 }
 
 const isNegotiationShown = ref<Map<string, boolean>>(new Map())

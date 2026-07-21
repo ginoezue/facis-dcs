@@ -65,7 +65,7 @@ oid4vp:
     enabled: true
     # Baked into the container image (see deployment/docker/Dockerfile).
     dataPath: /app/config/oid4vp/trust.dev.json
-    statusListSkipJWSVerify: false
+    xfscAllowUnsignedFallback: false
 
 customCA:
   enabled: false
@@ -89,15 +89,38 @@ archiveNotary:
     name: ""
     key: "ORCE_ARCHIVE_AUDIT_LOG_BEARER_TOKEN"
 
+global:
+  archiveAuditToken: ""
+  archiveAuditTokenSecretRef:
+    name: ""
+    key: "ORCE_ARCHIVE_AUDIT_LOG_BEARER_TOKEN"
+
 # Route and path configuration
 route:
   basePath: "/digital-contracting-service"
   publicBaseURL: ""
+  # Explicit override for the did:web hostname (see the 'didHostname' helper
+  # in _helpers.tpl). Empty falls back to publicBaseURL's host. Only needed
+  # when the did:web identifier's hostname differs from publicBaseURL's host
+  # (e.g. a cluster-routable hostname resolved via a CoreDNS rewrite rather
+  # than being the literal ingress host, as in the BDD two-instance suite).
+  didHostname: ""
 
 # Override individual paths (derived from route.basePath if not set)
 paths:
   api: ""
   ui: ""
+
+# DID identity Secret mount (DCS_DID). Disabled by default: most deployments
+# derive their signing identity from the PKCS#11 token directly. Enabled by
+# the BDD kind harness, where a post-install hsm-provision Job publishes
+# did.json (freshly derived from the in-cluster SoftHSM2 token key) into the
+# Secret named by the 'identitySecretName' helper.
+identity:
+  enabled: false
+  # Override the auto-derived <fullname>-identity Secret name.
+  secretName: ""
+  mountPath: "/app/identity"
 
 # Keycloak realm URL for Federated Catalogue.
 fcKeycloak:
@@ -143,6 +166,10 @@ signing:
 
   # RFC 3161 Timestamp Authority (optional; activates real timestamps on C2PA manifests).
   tsaURL: ""
+  # Optional: Secret (key tsa-cert.pem) holding the TSA certificate to trust
+  # for RFC3161 token verification, overriding the embedded certs/tsa.crt
+  # (mounted at /etc/dcs/tsa-trust, wired as TSA_TRUST_CERT_FILE).
+  tsaTrustCertSecret: ""
 
 # ---- PKCS#11 signing token (DCS-IR-HI-01) -----------------------------
 # Every private key is held in a PKCS#11 token. With provisioning.enabled a
@@ -366,3 +393,18 @@ nodeExporter:
 
 kubeStateMetrics:
   enabled: false
+
+# EU DSS demonstration webapp (AdES validation alongside the PKCS#11 signing
+# path — DCS-FR-SM-18, DCS-IR-SI-10, DCS-IR-CI-08). DISABLED by default:
+# there is no official EU-published container image (the webapp ships as a
+# ZIP/WAR), so charts/dss wraps a pinned community image; enabling it — and
+# setting the backend's DSS_URL env (e.g. http://<release>-dss:8080) — is an
+# explicit operator decision. The backend HARD-FAILS signature validation if
+# DSS_URL is configured but the instance is unreachable.
+# EU DSS for signature VALIDATION (DCS-FR-SM-18) and the wallet-driven
+# /signature/submit acceptance path (ADR-12). When enabled the backend gets
+# DSS_URL; the DCS validates a signature the SIGNATORY produced and holds no
+# contract-signing key. Disabled by default (an operator decision).
+dss:
+  enabled: false
+  # url: http://<release>-dss:8080  # defaults to the in-cluster dss service

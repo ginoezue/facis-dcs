@@ -1,16 +1,14 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { storeToRefs } from 'pinia'
-import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
-import { useTemplateEditorUiStore } from '@template-repository/store/templateEditorUiStore'
-import type { EnrichedBlockItem } from '@template-repository/models/enriched-block-item'
-import { useFlattenedOutline, type FlattenedOutlineItem } from '@template-repository/composables/useFlattenedOutline'
-import type { DcsBlock, DcsLayoutNode } from '@/models/dcs-jsonld'
-import { isDcsSection, isDcsApprovedTemplate } from '@/models/dcs-jsonld'
-import { isDcsMergedApprovedTemplate, type MergedApprovedTemplateBlock } from '@template-repository/store/dcsDraftStore'
 import EditorBlock from '@template-repository/components/builder-editor/document-block/EditorBlock.vue'
 import { useBlockMovementPreview } from '@template-repository/composables/useBlockMovementPreview'
-import { getOwnerBlockIdFromMergedBlockId, isMergedBlockId } from '@template-repository/utils/template-data-ref'
+import { type FlattenedOutlineItem, useFlattenedOutline } from '@template-repository/composables/useFlattenedOutline'
+import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
+import { useTemplateEditorUiStore } from '@template-repository/store/templateEditorUiStore'
+import { storeToRefs } from 'pinia'
+import { computed } from 'vue'
+import { isDcsSection } from '@/models/dcs-jsonld'
+import type { DcsBlock, DcsLayoutNode } from '@/models/dcs-jsonld'
+import type { EnrichedBlockItem } from '@template-repository/models/enriched-block-item'
 
 const draftStore = useDcsDraftStore()
 const uiStore = useTemplateEditorUiStore()
@@ -23,7 +21,7 @@ const flattened = useFlattenedOutline(layout)
 const flatItemsWithBlock = computed((): EnrichedBlockItem[] => {
   const layoutVal = layout.value
   const root = layoutVal.find((n) => n['dcs:isRoot'])
-  const blockById = new Map(blocks.value.map((b) => [b['@id'], b]))
+  const blockById = new Map<string, DcsBlock>(blocks.value.map((b) => [b['@id'], b]))
   return flattened.value.map((item) => enrichFlatItem(item, layoutVal, blockById, root))
 })
 
@@ -83,7 +81,7 @@ function layoutNodeChildIds(node: DcsLayoutNode): string[] {
 function enrichFlatItem(
   item: FlattenedOutlineItem,
   layout: DcsLayoutNode[],
-  blockById: Map<string, DcsBlock | MergedApprovedTemplateBlock>,
+  blockById: Map<string, DcsBlock>,
   root: DcsLayoutNode | undefined,
 ): EnrichedBlockItem {
   const parentNode = layout.find((n) => n['@id'] === item.parentBlockId)
@@ -102,21 +100,10 @@ function enrichFlatItem(
   const prevSiblingBlockId = parentChildren[item.siblingIndex - 1]
   const nextSiblingBlockId = parentChildren[item.siblingIndex + 1]
   const prevSiblingBlock = prevSiblingBlockId ? blockById.get(prevSiblingBlockId) : undefined
-  const prevSiblingIsContainer =
-    !!prevSiblingBlock &&
-    (isDcsSection(prevSiblingBlock as DcsBlock) || isDcsApprovedTemplate(prevSiblingBlock as DcsBlock))
+  const prevSiblingIsContainer = !!prevSiblingBlock && isDcsSection(prevSiblingBlock)
   const canIndent = item.siblingIndex > 0 && prevSiblingIsContainer
   const prevSiblingOutlineNode = prevSiblingBlockId ? layout.find((n) => n['@id'] === prevSiblingBlockId) : undefined
   const indentInsertIndex = prevSiblingOutlineNode ? layoutNodeChildIds(prevSiblingOutlineNode).length : 0
-
-  let mergedApprovedBlock: MergedApprovedTemplateBlock | undefined = undefined
-  if (isMergedBlockId(item.blockId)) {
-    const ownerBlockId = getOwnerBlockIdFromMergedBlockId(item.blockId)
-    const ownerBlock = ownerBlockId ? blockById.get(ownerBlockId) : undefined
-    if (ownerBlock && isDcsMergedApprovedTemplate(ownerBlock)) {
-      mergedApprovedBlock = ownerBlock
-    }
-  }
 
   return {
     blockId: item.blockId,
@@ -133,7 +120,6 @@ function enrichFlatItem(
     outdentInsertIndex,
     indentParentBlockId: prevSiblingBlockId ?? '',
     indentInsertIndex,
-    mergedApprovedBlock,
   }
 }
 </script>
@@ -145,15 +131,15 @@ function enrichFlatItem(
       :key="item.blockId"
       :class="[
         'flex min-w-0 items-stretch',
-        'transition-[opacity] duration-200 ease-out',
+        'transition-opacity duration-200 ease-out',
         isInFadeOutSet(item.blockId) && 'opacity-50',
       ]"
     >
       <!-- Indent area: width by depth, left border for children to show hierarchy -->
       <div
-        v-if="item.block && !isDcsMergedApprovedTemplate(item.block)"
+        v-if="item.block"
         :class="[
-          'relative flex min-h-[2.5rem] flex-shrink-0 items-center',
+          'relative flex min-h-10 shrink-0 items-center',
           'transition-[width] duration-300 ease-out',
           item.depthLevel > 0 && !horizontalPreviewFor(item) && 'border-l-2 border-base-300',
           horizontalPreviewFor(item) && 'border-l-2 border-primary',

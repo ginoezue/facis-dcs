@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useContractTemplateEventType } from '@/composables/useContractTemplateEventType'
-import type { ContractTemplateAuditResponse } from '@/models/responses/template-response'
 import { toProperCase } from '@/utils/string'
+import type { ContractTemplateAuditResponse } from '@/models/responses/template-response'
 
 defineProps<{
   audits: ContractTemplateAuditResponse
@@ -50,7 +50,7 @@ const policyBadgeClass = (audit: TemplateAuditItem) => {
           <div class="text-sm opacity-80">{{ policyField(audit, 'message') }}</div>
           <div class="text-xs opacity-60">
             {{ policyField(audit, 'ruleId') }}
-            <span v-if="policyField(audit, 'semanticPath')">· {{ policyField(audit, 'semanticPath') }}</span>
+            <span v-if="policyField(audit, 'fieldIri')">· {{ policyField(audit, 'fieldIri') }}</span>
             <span v-if="policyField(audit, 'requirement')">· {{ policyField(audit, 'requirement') }}</span>
           </div>
         </div>

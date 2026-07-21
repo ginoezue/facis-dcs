@@ -17,6 +17,7 @@ import (
 	"digital-contracting-service/internal/base"
 	"digital-contracting-service/internal/base/conf"
 	"digital-contracting-service/internal/base/datatype/componenttype"
+	"digital-contracting-service/internal/base/datatype/userrole"
 	cwedb "digital-contracting-service/internal/contractworkflowengine/db"
 	"digital-contracting-service/internal/middleware"
 	pacevent "digital-contracting-service/internal/processauditandcompliance/event"
@@ -31,6 +32,7 @@ type processAuditAndCompliancesrvc struct {
 	ATrailReader base.AuditTrailReader
 	CTRepo       templatedb.ContractTemplateRepo
 	CRepo        cwedb.ContractRepo
+	ATRepo       cwedb.ApprovalTaskRepo
 	auth.JWTAuthenticator
 }
 
@@ -45,8 +47,8 @@ type auditScopeConfig struct {
 	includeArchiveTrail            bool
 }
 
-func NewProcessAuditAndCompliance(db *sqlx.DB, jwtAuth auth.JWTAuthenticator, auditTrailReader base.AuditTrailReader, ctRepo templatedb.ContractTemplateRepo, cRepo cwedb.ContractRepo) processauditandcompliance.Service {
-	return &processAuditAndCompliancesrvc{DB: db, JWTAuthenticator: jwtAuth, ATrailReader: auditTrailReader, CTRepo: ctRepo, CRepo: cRepo}
+func NewProcessAuditAndCompliance(db *sqlx.DB, jwtAuth auth.JWTAuthenticator, auditTrailReader base.AuditTrailReader, ctRepo templatedb.ContractTemplateRepo, cRepo cwedb.ContractRepo, atRepo cwedb.ApprovalTaskRepo) processauditandcompliance.Service {
+	return &processAuditAndCompliancesrvc{DB: db, JWTAuthenticator: jwtAuth, ATrailReader: auditTrailReader, CTRepo: ctRepo, CRepo: cRepo, ATRepo: atRepo}
 }
 
 func (s *processAuditAndCompliancesrvc) Audit(ctx context.Context, req *processauditandcompliance.PACAuditRequest) (res []*processauditandcompliance.PACAuditResponse, err error) {
@@ -62,12 +64,20 @@ func (s *processAuditAndCompliancesrvc) Audit(ctx context.Context, req *processa
 		return nil, processauditandcompliance.MakeInternalError(err)
 	}
 	scope := scopeConfig.component
+	roles := middleware.GetUserRoles(ctx)
+	if userrole.UserRoles(roles).HasRoles(userrole.ArchiveManager) && !userrole.UserRoles(roles).HasRoles(userrole.Auditor) && scopeConfig.scopeName != "archive" {
+		return nil, processauditandcompliance.MakeForbidden(fmt.Errorf("Archive Manager may only audit archive scope"))
+	}
 
 	qry := qry2.GetAuditLogQry{
-		Scope:     scope,
-		AuditedBy: middleware.GetParticipantID(ctx),
-		HolderDID: middleware.GetHolderDID(ctx),
-		UserRoles: middleware.GetUserRoles(ctx),
+		Scope:         scope,
+		AuditedBy:     middleware.GetParticipantID(ctx),
+		HolderDID:     middleware.GetHolderDID(ctx),
+		UserRoles:     middleware.GetUserRoles(ctx),
+		Justification: req.Justification,
+	}
+	if req.Did != nil {
+		qry.DID = strings.TrimSpace(*req.Did)
 	}
 	handler := qry2.Auditor{
 		DB:           s.DB,
@@ -249,7 +259,10 @@ func (s *processAuditAndCompliancesrvc) Audit(ctx context.Context, req *processa
 		})
 	}
 	for did, entries := range contractContentEntriesByDID {
-		if seenDIDs[did] || len(entries) == 0 {
+		// A content-audited contract with zero findings is a COMPLIANT result,
+		// not an unaudited one — it must appear in the audit with an empty
+		// trail (the SHACL engine only reports non-conformance, ADR-9).
+		if seenDIDs[did] {
 			continue
 		}
 
@@ -286,6 +299,22 @@ func (s *processAuditAndCompliancesrvc) Audit(ctx context.Context, req *processa
 		})
 	}
 
+	if req.Did != nil && strings.TrimSpace(*req.Did) != "" {
+		filtered := result[:0]
+		for _, response := range result {
+			if response.Did == strings.TrimSpace(*req.Did) {
+				filtered = append(filtered, response)
+			}
+		}
+		result = filtered
+	}
+	for _, response := range result {
+		for _, entry := range response.AuditTrail {
+			if entry.Kind == nil {
+				entry.Kind = stringPointer("TIMELINE")
+			}
+		}
+	}
 	return result, nil
 }
 
@@ -362,7 +391,7 @@ func (s *processAuditAndCompliancesrvc) validateAuditScopeDependencies(scopeConf
 	return nil
 }
 
-func (s *processAuditAndCompliancesrvc) AuditReport(ctx context.Context, p *processauditandcompliance.AuditReportPayload) (res any, err error) {
+func (s *processAuditAndCompliancesrvc) AuditReport(ctx context.Context, p *processauditandcompliance.AuditReportPayload) (res []byte, err error) {
 	log.Printf(ctx, "processAuditAndCompliance.audit_report")
 	scope := "contracts"
 	if p != nil && p.Scope != nil && strings.TrimSpace(*p.Scope) != "" {
@@ -379,8 +408,12 @@ func (s *processAuditAndCompliancesrvc) AuditReport(ctx context.Context, p *proc
 	if format != "json" && format != "csv" && format != "pdf" {
 		return nil, fmt.Errorf("unsupported audit report format %q", format)
 	}
+	roles := middleware.GetUserRoles(ctx)
+	if userrole.UserRoles(roles).HasRoles(userrole.ArchiveManager) && !userrole.UserRoles(roles).HasRoles(userrole.Auditor) && strings.ToLower(scope) != "archive" {
+		return nil, processauditandcompliance.MakeForbidden(fmt.Errorf("Archive Manager may only export archive scope"))
+	}
 
-	auditResponses, err := s.Audit(ctx, &processauditandcompliance.PACAuditRequest{Scope: scope})
+	auditResponses, err := s.Audit(ctx, &processauditandcompliance.PACAuditRequest{Scope: scope, Did: p.Did, Justification: p.Justification})
 	if err != nil {
 		return nil, err
 	}
@@ -389,39 +422,42 @@ func (s *processAuditAndCompliancesrvc) AuditReport(ctx context.Context, p *proc
 	report := buildAuditReport(scope, did, generatedBy, generatedAt, auditResponses)
 	report.Format = format
 
-	var response any
-	var contentHash string
+	var content []byte
 	switch format {
 	case "json":
 		bytes, err := json.Marshal(report)
 		if err != nil {
 			return nil, err
 		}
-		contentHash = hashBytes(bytes)
-		report.ContentHash = contentHash
-		response = report
+		content = bytes
 	case "csv":
 		bytes, err := renderAuditReportCSV(report)
 		if err != nil {
 			return nil, err
 		}
-		download := reportDownloadEnvelope(report, format, bytes, "text/csv")
-		contentHash = download.ContentHash
-		response = download
+		content = bytes
 	case "pdf":
-		bytes := renderAuditReportPDF(report)
-		download := reportDownloadEnvelope(report, format, bytes, "application/pdf")
-		contentHash = download.ContentHash
-		response = download
+		content = renderAuditReportPDF(report)
 	}
 
-	if err := s.persistReportGeneratedEvent(ctx, report, format, contentHash); err != nil {
+	contentHash := hashBytes(content)
+	contentCID := ""
+	if s.ATrailReader.IPFSClient != nil {
+		stored, err := s.ATrailReader.IPFSClient.CreateFile(ctx, content)
+		if err != nil {
+			return nil, fmt.Errorf("archive audit report bytes: %w", err)
+		}
+		if stored != nil {
+			contentCID = stored.Identifier.Value
+		}
+	}
+	if err := s.persistReportGeneratedEvent(ctx, report, format, contentHash, contentCID, p.Justification); err != nil {
 		return nil, err
 	}
-	return response, nil
+	return content, nil
 }
 
-func (s *processAuditAndCompliancesrvc) persistReportGeneratedEvent(ctx context.Context, report auditReport, format string, contentHash string) error {
+func (s *processAuditAndCompliancesrvc) persistReportGeneratedEvent(ctx context.Context, report auditReport, format string, contentHash, contentCID, justification string) error {
 	if s.DB == nil {
 		return nil
 	}
@@ -435,13 +471,15 @@ func (s *processAuditAndCompliancesrvc) persistReportGeneratedEvent(ctx context.
 		}
 	}()
 	evt := pacevent.ReportGeneratedEvent{
-		ReportID:    report.ReportID,
-		Scope:       report.Scope,
-		Format:      format,
-		DID:         report.DID,
-		GeneratedBy: report.GeneratedBy,
-		GeneratedAt: time.Now().UTC(),
-		ContentHash: contentHash,
+		ReportID:      report.ReportID,
+		Scope:         report.Scope,
+		Format:        format,
+		DID:           report.DID,
+		GeneratedBy:   report.GeneratedBy,
+		GeneratedAt:   time.Now().UTC(),
+		ContentHash:   contentHash,
+		ContentCID:    contentCID,
+		Justification: justification,
 		Summary: map[string]int{
 			"totalEvents": report.Summary.TotalEvents,
 			"totalChecks": report.Summary.TotalChecks,
@@ -453,7 +491,11 @@ func (s *processAuditAndCompliancesrvc) persistReportGeneratedEvent(ctx context.
 		HolderDID: middleware.GetHolderDID(ctx),
 		UserRoles: middleware.GetUserRoles(ctx),
 	}
-	if err := baseevent.Create(ctx, tx, evt, componenttype.ProcessAuditAndCompliance); err != nil {
+	reportScope, scopeErr := resolveAuditScope(report.Scope)
+	if scopeErr != nil {
+		return fmt.Errorf("resolve report audit scope: %w", scopeErr)
+	}
+	if err := baseevent.Create(ctx, tx, evt, reportScope.component); err != nil {
 		return fmt.Errorf("could not create report event: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -462,9 +504,38 @@ func (s *processAuditAndCompliancesrvc) persistReportGeneratedEvent(ctx context.
 	return nil
 }
 
-func (s *processAuditAndCompliancesrvc) Monitor(ctx context.Context, p *processauditandcompliance.MonitorPayload) (res any, err error) {
-	log.Printf(ctx, "processAuditAndCompliance.monitor")
-	return
+func (s *processAuditAndCompliancesrvc) Monitor(ctx context.Context, p *processauditandcompliance.MonitorPayload) (res *processauditandcompliance.PACMonitorResponse, err error) {
+
+	ctx, cancel := context.WithTimeout(ctx, conf.TransactionTimeout())
+	defer cancel()
+
+	handler := qry2.ComplianceMonitor{
+		DB:     s.DB,
+		ATRepo: s.ATRepo,
+		CRepo:  s.CRepo,
+	}
+	result, err := handler.Handle(ctx, qry2.MonitorQry{
+		MonitoredBy: middleware.GetParticipantID(ctx),
+		HolderDID:   middleware.GetHolderDID(ctx),
+		UserRoles:   middleware.GetUserRoles(ctx),
+	})
+	if err != nil {
+		return nil, processauditandcompliance.MakeInternalError(err)
+	}
+
+	risks := make([]*processauditandcompliance.PACComplianceRisk, 0, len(result.Risks))
+	for _, risk := range result.Risks {
+		risks = append(risks, &processauditandcompliance.PACComplianceRisk{
+			Did:        risk.DID,
+			RiskType:   risk.RiskType,
+			Detail:     risk.Detail,
+			DetectedAt: risk.DetectedAt.Format(time.RFC3339),
+		})
+	}
+	return &processauditandcompliance.PACMonitorResponse{
+		CheckedAt: result.CheckedAt.Format(time.RFC3339),
+		Risks:     risks,
+	}, nil
 }
 
 func (s *processAuditAndCompliancesrvc) IncidentReport(ctx context.Context, p *processauditandcompliance.IncidentReportPayload) (res any, err error) {

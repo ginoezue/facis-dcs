@@ -1,28 +1,30 @@
 <script setup lang="ts">
+import { storeToRefs } from 'pinia'
+import { computed, onMounted, onUnmounted, type Ref, ref, useTemplateRef, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import ConfirmationModal from '@/components/ConfirmationModal.vue'
 import ContractManagerActions from '@/components/contract/ContractManagerActions.vue'
-import type { Contract } from '@/models/contract/contract'
+import { useDocumentExport } from '@/composables/useDocumentExport'
+import WorkflowStageBanner from '@/core/components/WorkflowStageBanner.vue'
+import { contractStory, toBannerActions } from '@/core/workflow-story'
 import AuditView from '@/modules/contract-workflow-engine/components/AuditView.vue'
 import ContractDetailsEditor from '@/modules/contract-workflow-engine/components/ContractDetailsEditor.vue'
 import { useContractDataPreprocess } from '@/modules/contract-workflow-engine/composables/useContractDataPreprocess'
+import { useContractPermissions } from '@/modules/contract-workflow-engine/composables/useContractPermissions'
 import { useSemanticValueVerification } from '@/modules/contract-workflow-engine/composables/useSemanticValueVerification'
-import type { SemanticConditionValueSetter } from '@/modules/contract-workflow-engine/models/contract-content-values-store'
 import { useContractContentValuesStore } from '@/modules/contract-workflow-engine/store/contractContentValuesStore'
 import { useContractEditorUiStore } from '@/modules/contract-workflow-engine/store/contractEditorUiStore'
 import TemplatePreview from '@/modules/template-repository/components/builder-editor/preview/TemplatePreview.vue'
-import { useContractPermissions } from '@/modules/contract-workflow-engine/composables/useContractPermissions'
 import { useDcsDraftStore } from '@/modules/template-repository/store/dcsDraftStore'
 import { useTemplateEditorUiStore } from '@/modules/template-repository/store/templateEditorUiStore'
-import { getSemanticConditionsFromTemplateData } from '@/modules/template-repository/store/dcsDraftStore'
 import { contractWorkflowService } from '@/services/contract-workflow-service'
 import { useAuthStore } from '@/stores/auth-store'
 import { useErrorStore } from '@/stores/error-store'
 import { useNavStore } from '@/stores/nav-store'
 import { ContractState } from '@/types/contract-state'
+import type { Contract } from '@/models/contract/contract'
+import type { SemanticConditionValueSetter } from '@/modules/contract-workflow-engine/models/contract-content-values-store'
 import type { UserRole } from '@/types/user-role'
-import { storeToRefs } from 'pinia'
-import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch, type Ref } from 'vue'
-import { useRoute } from 'vue-router'
 
 const route = useRoute()
 const navStore = useNavStore()
@@ -58,16 +60,11 @@ const isAuditingAuthorized = computed(
 
 const tabs = computed(() => contractEditorUiStore.availableTabs(contract.value?.state ?? ContractState.draft))
 
+const story = computed(() => contractStory(contract.value?.state))
+
 const verificationResult = computed(() => {
-  const subTemplateSemanticConditions = dcsDraftStore.subTemplateSnapshots.map((subTemplate) => ({
-    templateId: subTemplate.did,
-    version: subTemplate.version,
-    document_number: subTemplate.document_number,
-    semanticConditions: getSemanticConditionsFromTemplateData(subTemplate.template_data),
-  }))
   return verifySemanticValue(
     dcsDraftStore.semanticConditions,
-    subTemplateSemanticConditions,
     contractContentValuesStore.semanticConditionValues,
     dcsDraftStore.blocks,
   )
@@ -94,7 +91,7 @@ watch(
 )
 
 watch(
-  () => [dcsDraftStore.blocks, dcsDraftStore.semanticConditions, dcsDraftStore.subTemplateSnapshots],
+  () => [dcsDraftStore.blocks, dcsDraftStore.semanticConditions],
   () => {
     const invalidValues = contractContentValuesStore.semanticConditionValues.filter(
       (conditionValue) =>
@@ -102,7 +99,6 @@ watch(
           conditionValue,
           dcsDraftStore.blocks,
           dcsDraftStore.semanticConditions,
-          dcsDraftStore.subTemplateSnapshots,
         ),
     )
     contractContentValuesStore.removeSemanticConditionValues(invalidValues)
@@ -200,11 +196,11 @@ function applyContractDataToDraft(contractData?: unknown) {
   if (cd) {
     dcsDraftStore.reset({
       workflow: 'contract',
+      documentIri: ((contractData as Record<string, unknown>)['@id'] as string | undefined) ?? null,
       blocks: cd.blocks,
       layout: cd.layout,
       contractData: cd.contractData,
       policies: cd.policies,
-      subTemplateSnapshots: cd.subTemplateSnapshots,
     })
     contractContentValuesStore.reset({ semanticConditionValues: cd.semanticConditionValues ?? [] })
   } else {
@@ -213,18 +209,12 @@ function applyContractDataToDraft(contractData?: unknown) {
   }
 }
 
-const exportPDF = async () => {
-  if (contract?.value?.did === null || contract?.value?.did === undefined) {
-    return
-  }
+const { download: downloadExport, exporting } = useDocumentExport()
 
-  const blob = await contractWorkflowService.exportPdf(contract?.value?.did)
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `contract-${contract?.value?.did}.pdf`
-  a.click()
-  URL.revokeObjectURL(url)
+const exportPDF = async () => {
+  const did = contract?.value?.did
+  if (!did) return
+  await downloadExport(() => contractWorkflowService.exportPdf(did), `contract-${did}.pdf`)
 }
 </script>
 
@@ -254,6 +244,13 @@ const exportPDF = async () => {
         <div class="mt-5 grow">
           <div class="mx-auto max-w-4xl p-6">
             <div class="grid grid-cols-1 gap-4">
+              <WorkflowStageBanner
+                :steps="story.steps"
+                :current-key="story.currentKey"
+                :headline="story.headline"
+                :narrative="story.narrative"
+                :actions="toBannerActions(story.actionHints)"
+              />
               <div v-show="activeTab === 'details'">
                 <ContractDetailsEditor :contract="contract" disabled />
               </div>
@@ -268,7 +265,6 @@ const exportPDF = async () => {
                         :semantic-conditions="dcsDraftStore.semanticConditions"
                         :semantic-condition-values="contractContentValuesStore.semanticConditionValues"
                         :verification-result="verificationResult"
-                        :sub-template-snapshots="dcsDraftStore.subTemplateSnapshots"
                         :set-semantic-condition-value="setSemanticConditionValue"
                       />
                     </div>
@@ -294,7 +290,7 @@ const exportPDF = async () => {
     <div class="sticky bottom-0 shrink-0 border-t border-base-300 bg-base-100">
       <div class="mx-auto flex max-w-4xl flex-col gap-3 px-6 py-3 md:flex-row">
         <button class="btn btn-outline md:w-32" @click="$router.back()">Back</button>
-        <button class="btn btn-outline md:w-32" @click="exportPDF">Export PDF</button>
+        <button class="btn btn-outline md:w-32" :disabled="exporting" @click="exportPDF">Export PDF</button>
         <button
           v-if="contract?.state === ContractState.submitted"
           class="btn flex-1 btn-primary"

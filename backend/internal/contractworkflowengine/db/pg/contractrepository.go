@@ -136,6 +136,20 @@ func (r *PostgresContractRepo) ExistsByDID(ctx context.Context, tx *sqlx.Tx, did
 	return exists, nil
 }
 
+func (r *PostgresContractRepo) ReadChildrenDIDs(ctx context.Context, tx *sqlx.Tx, did string) ([]string, error) {
+	query := `
+        SELECT did
+        FROM contracts_effective
+        WHERE regexp_replace(contract_data->'dcs:parentContract'->>'@id', '^.*/', '') = $1
+        ORDER BY did
+    `
+	children := []string{}
+	if err := tx.SelectContext(ctx, &children, query, did); err != nil {
+		return nil, err
+	}
+	return children, nil
+}
+
 func (r *PostgresContractRepo) ReadAllMetaData(ctx context.Context, tx *sqlx.Tx, pagination datatype.Pagination) ([]db.ContractMetadata, error) {
 	query := `
 		SELECT
@@ -146,7 +160,7 @@ func (r *PostgresContractRepo) ReadAllMetaData(ctx context.Context, tx *sqlx.Tx,
 			AND COALESCE(latest.version > cem.template_version, FALSE) AS outdated,
 			latest.did AS latest_template_did,
 			COALESCE(tpl.state = 'DEPRECATED', FALSE) AS template_is_deprecated,
-			ce.contract_data->'dcs:parentContract'->>'@id' AS parent_contract_did,
+			regexp_replace(ce.contract_data->'dcs:parentContract'->>'@id', '^.*/', '') AS parent_contract_did,
 			COALESCE(cem.name, ce.contract_data->'dcs:metadata'->>'dcs:title') AS name
 		FROM contracts_effective_metadata cem
 		LEFT JOIN contracts_effective ce ON ce.did = cem.did
@@ -208,7 +222,7 @@ func (r *PostgresContractRepo) ReadAllMetaDataByFilter(ctx context.Context, tx *
 
 func (r *PostgresContractRepo) ReadProcessDataByDID(ctx context.Context, tx *sqlx.Tx, did string) (*db.ContractProcessData, error) {
 	query := `
-        SELECT did, origin,  state, updated_at, created_by, contract_version, start_date, exp_date, exp_policy, exp_notice_period
+        SELECT did, origin,  state, updated_at, content_updated_at, created_by, contract_version, start_date, exp_date, exp_policy, exp_notice_period
         FROM contracts_effective_process_data WHERE did = $1
     `
 	var processData db.ContractProcessData
@@ -224,7 +238,7 @@ func (r *PostgresContractRepo) ReadProcessDataByDID(ctx context.Context, tx *sql
 
 func (r *PostgresContractRepo) ReadProcessDataByDIDOrNil(ctx context.Context, tx *sqlx.Tx, did string) (*db.ContractProcessData, error) {
 	query := `
-        SELECT did, origin,  state, updated_at, created_by, contract_version, start_date, exp_date, exp_policy, exp_notice_period
+        SELECT did, origin,  state, updated_at, content_updated_at, created_by, contract_version, start_date, exp_date, exp_policy, exp_notice_period
         FROM contracts_effective_process_data WHERE did = $1
     `
 	var processData db.ContractProcessData
@@ -301,9 +315,63 @@ func (r *PostgresContractRepo) ReadArchiveEntries(ctx context.Context, tx *sqlx.
 	return entries, nil
 }
 
+func (r *PostgresContractRepo) MarkArchiveEntryDeleted(ctx context.Context, tx *sqlx.Tx, did string, deletedBy string, reason string) (int, error) {
+	// archive_status must flip to DELETED together with the deletion
+	// metadata: the contract_archive_entries trigger
+	// (migrations/sql/20260305_create_contract_repository.sql) rejects
+	// deletion metadata on rows whose status is still STORED/RETAINED.
+	statement := `
+        UPDATE contract_archive_entries
+        SET archive_status = 'DELETED', deleted_at = NOW(), deleted_by = $1, deletion_reason = $2
+        WHERE did = $3 AND deleted_at IS NULL
+    `
+	result, err := tx.ExecContext(ctx, statement, deletedBy, reason, did)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
+func (r *PostgresContractRepo) AnnotateArchiveEntry(ctx context.Context, tx *sqlx.Tx, did string, summary string, tags *datatype.JSON) (int, error) {
+	// Only the annotation columns are updated; the immutable-fields trigger
+	// on contract_archive_entries guards the snapshot/evidence columns, and
+	// DELETED entries are excluded so a soft-deleted entry can never be
+	// re-labelled.
+	statement := `
+        UPDATE contract_archive_entries
+        SET summary = $1, tags = COALESCE($2, tags)
+        WHERE did = $3 AND archive_status <> 'DELETED'
+    `
+	result, err := tx.ExecContext(ctx, statement, summary, tags, did)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
+func (r *PostgresContractRepo) ReadSignedSignatureFieldNames(ctx context.Context, tx *sqlx.Tx, did string) ([]string, error) {
+	var fields []string
+	err := tx.SelectContext(ctx, &fields, `
+        SELECT field_name FROM contract_signatures
+        WHERE contract_did = $1 AND status = 'SIGNED' AND field_name IS NOT NULL
+    `, did)
+	if err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
 func (r *PostgresContractRepo) ReadArchivedContracts(ctx context.Context, tx *sqlx.Tx) ([]db.ContractMetadata, error) {
 	query := `
-	    SELECT did, state, name, description, created_by, created_at, updated_at, contract_version, start_date, exp_date, exp_policy, exp_notice_period, responsible, evidence
+	    SELECT did, state, name, description, created_by, created_at, updated_at, contract_version, start_date, exp_date, exp_policy, exp_notice_period, responsible, evidence, archive_summary, archive_tags
     FROM contracts_archive_metadata
 	`
 	var cts []db.ContractMetadata
@@ -317,7 +385,7 @@ func (r *PostgresContractRepo) ReadArchivedContracts(ctx context.Context, tx *sq
 
 func (r *PostgresContractRepo) ReadArchivedContractsByFilter(ctx context.Context, tx *sqlx.Tx, values db.SearchValues) ([]db.ContractMetadata, error) {
 	query := `
-	        SELECT did, state, name, description, created_by, created_at, updated_at, contract_version, start_date, exp_date, exp_policy, exp_notice_period, responsible, evidence
+	        SELECT did, state, name, description, created_by, created_at, updated_at, contract_version, start_date, exp_date, exp_policy, exp_notice_period, responsible, evidence, archive_summary, archive_tags
         FROM contracts_archive_metadata
     `
 	conditions, params, err := createSearchConditions(values)
@@ -418,11 +486,18 @@ func createSearchConditions(values db.SearchValues) (*string, []interface{}, err
 		params = append(params, values.ContractData)
 		paramIndex++
 	}
+	if len(values.Tag) > 0 {
+		// Annotation-tag filter (DCS-FR-CSA-11): archive_tags is a JSONB
+		// string array on the archive view, GIN-indexed for containment.
+		conditions += ` archive_tags @> jsonb_build_array($` + strconv.Itoa(paramIndex) + `::text) AND`
+		params = append(params, values.Tag)
+		paramIndex++
+	}
 	if len(values.ParentDID) > 0 {
 		// Reverse-index over locally held children: match the child's stored
 		// dcs:parentContract @id in contracts_effective. Kept as a DID-scoped
 		// subquery so it composes with any outer metadata/archive table.
-		conditions += ` did IN (SELECT did FROM contracts_effective WHERE contract_data->'dcs:parentContract'->>'@id' = $` + strconv.Itoa(paramIndex) + `) AND`
+		conditions += ` did IN (SELECT did FROM contracts_effective WHERE regexp_replace(contract_data->'dcs:parentContract'->>'@id', '^.*/', '') = $` + strconv.Itoa(paramIndex) + `) AND`
 		params = append(params, values.ParentDID)
 	}
 	l := len(" AND")

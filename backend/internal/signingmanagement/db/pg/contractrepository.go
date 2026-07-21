@@ -23,13 +23,18 @@ type PostgresContractRepo struct {
 	PDFCore    *pdfcore.Client
 }
 
+// ReadDataByDID reads the contract regardless of lifecycle state — like
+// ReadProcessDataByDID, state gating is decided in Go against
+// contractstate.Transitions (command/apply.go), not by a hardcoded SQL state
+// literal. Signature evidence in particular stays retrievable for the
+// contract's whole post-signing life (ACTIVE after deployment, REVOKED after
+// revocation, ...), not only while it sits in APPROVED/SIGNED.
 func (r *PostgresContractRepo) ReadDataByDID(ctx context.Context, tx *sqlx.Tx, did string) (*db.Contract, error) {
 	query := `
         SELECT did, state, name, description,
                created_by, created_at, updated_at, contract_version, contract_data, start_date, exp_date, exp_policy, exp_notice_period, responsible
         FROM contracts
         WHERE did = $1
-         AND state IN ('APPROVED', 'SIGNED')
     `
 	var ct db.Contract
 	err := tx.GetContext(ctx, &ct, query, did)
@@ -43,10 +48,13 @@ func (r *PostgresContractRepo) ReadDataByDID(ctx context.Context, tx *sqlx.Tx, d
 }
 
 func (r *PostgresContractRepo) ReadAllMetaData(ctx context.Context, tx *sqlx.Tx, pagination datatype.Pagination) ([]db.ContractMetadata, error) {
+	// ACTIVE belongs here too: signing completion auto-deploys the contract
+	// (SIGNED -> ACTIVE), so a fully-signed contract that the Signature Compliance
+	// Viewer must still inspect lives in ACTIVE, not SIGNED.
 	query := `
         SELECT did, state, name, description, created_by, created_at, updated_at, contract_version, start_date, exp_date, exp_policy, exp_notice_period, responsible
         FROM contracts
-        WHERE state IN ('APPROVED', 'SIGNED')
+        WHERE state IN ('APPROVED', 'SIGNED', 'ACTIVE')
     `
 
 	var params []any
@@ -97,16 +105,29 @@ func (r *PostgresContractRepo) UpdateState(ctx context.Context, tx *sqlx.Tx, did
 	return err
 }
 
+// UpdateContractData persists the sealed contract document the first
+// signature commits to (command/apply.go's Offer-to-Agreement seal); it
+// runs inside the signing transaction, before the content hash and the
+// PAdES signature are computed over the same bytes.
+func (r *PostgresContractRepo) UpdateContractData(ctx context.Context, tx *sqlx.Tx, did string, contractData datatype.JSON) error {
+	statement := `
+        UPDATE contracts SET contract_data = $2
+        WHERE did = $1
+    `
+	_, err := tx.ExecContext(ctx, statement, did, contractData)
+	return err
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 
 func (r *PostgresContractRepo) CreateSignature(ctx context.Context, tx *sqlx.Tx, signature db.ContractSignature) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO contract_signatures
 			(contract_did, signer_did, credential_type, signature_bytes, status, key_version,
-			 ipfs_cid, ceremony_id, pdf_hash, content_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			 ipfs_cid, ceremony_id, pdf_hash, content_hash, field_name, jades_signature)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		signature.ContractDID, signature.SignerDID, signature.CredentialType, signature.SignatureBytes, signature.Status, signature.KeyVersion,
-		signature.IpfsCID, signature.CeremonyID, signature.PDFHash, signature.ContentHash,
+		signature.IpfsCID, signature.CeremonyID, signature.PDFHash, signature.ContentHash, signature.FieldName, signature.JAdESSignature,
 	)
 	if err != nil {
 		return fmt.Errorf("could not create contract signature: %w", err)
@@ -123,9 +144,11 @@ func (r *PostgresContractRepo) CreateSignature(ctx context.Context, tx *sqlx.Tx,
 // PDF, which breaks standards-compliant PAdES validation even though the CMS
 // signature itself stays intact.
 func (r *PostgresContractRepo) SetSignedPDF(ctx context.Context, tx *sqlx.Tx, did, ipfsCID, rendererVersion, c2paState, payloadHash string) error {
+	// NULLIF/COALESCE: a later multi-signer signature skips lifecycle
+	// stamping (no fresh renderer version) — keep the stored one.
 	_, err := tx.ExecContext(ctx, `
 		UPDATE contracts
-		   SET pdf_ipfs_cid = $2, pdf_renderer_version = $3, pdf_c2pa_state = $4, pdf_payload_hash = $5
+		   SET pdf_ipfs_cid = $2, pdf_renderer_version = COALESCE(NULLIF($3, ''), pdf_renderer_version), pdf_c2pa_state = $4, pdf_payload_hash = $5
 		 WHERE did = $1`,
 		did, ipfsCID, rendererVersion, c2paState, payloadHash,
 	)
@@ -153,7 +176,7 @@ func (r *PostgresContractRepo) ActiveKeyVersion(ctx context.Context, tx *sqlx.Tx
 
 func (r *PostgresContractRepo) RevokeSignature(ctx context.Context, tx *sqlx.Tx, did string, signerDID string) error {
 	now := time.Now().UTC()
-	_, err := tx.ExecContext(ctx,
+	result, err := tx.ExecContext(ctx,
 		`UPDATE contract_signatures
 		    SET status = 'REVOKED', revoked_at = $1
 		  WHERE contract_did = $2 AND signer_did = $3 AND status != 'REVOKED'`,
@@ -161,6 +184,13 @@ func (r *PostgresContractRepo) RevokeSignature(ctx context.Context, tx *sqlx.Tx,
 	)
 	if err != nil {
 		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: no revocable signature by signer %s on contract %s", db.ErrSignatureNotFound, signerDID, did)
 	}
 	return nil
 }
@@ -303,7 +333,7 @@ func (r *PostgresContractRepo) CollectValidationFindings(ctx context.Context, tx
 func (r *PostgresContractRepo) LoadSignatures(ctx context.Context, tx *sqlx.Tx, did string) ([]db.SignatureRecord, error) {
 	var records []db.SignatureRecord
 	err := tx.SelectContext(ctx, &records,
-		`SELECT signer_did, credential_type, status, signed_at, revoked_at, cert_revoked_at
+		`SELECT signer_did, credential_type, status, signed_at, revoked_at, cert_revoked_at, field_name, jades_signature
 		   FROM contract_signatures
 		  WHERE contract_did = $1
 		  ORDER BY created_at`, did,

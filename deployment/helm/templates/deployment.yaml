@@ -77,6 +77,16 @@ spec:
               containerPort: {{ .Values.service.port }}
               protocol: TCP
           env:
+            - name: DCS_SYSTEM_TOKEN
+              value: {{ .Values.systemToken | default "dcs-dev-system-token" | quote }}
+            {{- if .Values.dss }}{{- if .Values.dss.enabled }}
+            # EU DSS for signature VALIDATION (DCS-FR-SM-18) and the
+            # wallet-driven /signature/submit acceptance path (ADR-12). The DCS
+            # validates a signature the SIGNATORY produced with their wallet/QTSP
+            # or a desktop PAdES signer; it holds no contract-signing key.
+            - name: DSS_URL
+              value: {{ .Values.dss.url | default (printf "http://%s-dss:8080" .Release.Name) | quote }}
+            {{- end }}{{- end }}
             {{- if and .Values.hydra.enabled .Values.hydra.clients }}
             {{- $hydraClient := index .Values.hydra.clients 0 }}
             - name: HYDRA_PUBLIC_ISSUER_URL
@@ -143,12 +153,14 @@ spec:
             {{- if .Values.route.publicBaseURL }}
             - name: DCS_PUBLIC_BASE_URL
               value: {{ .Values.route.publicBaseURL | quote }}
+            - name: DCS_PUBLIC_URL
+              value: {{ include "digital-contracting-service.publicAnchorBaseURL" . | quote }}
             {{- end }}
             {{- if .Values.oid4vp.trust.enabled }}
             - name: OID4VP_TRUST_DATA_PATH
               value: {{ .Values.oid4vp.trust.dataPath | quote }}
-            {{- if .Values.oid4vp.trust.statusListSkipJWSVerify }}
-            - name: OID4VP_STATUSLIST_SKIP_JWS_VERIFY
+            {{- if .Values.oid4vp.trust.xfscAllowUnsignedFallback }}
+            - name: OID4VP_XFSC_ALLOW_UNSIGNED_FALLBACK
               value: "true"
             {{- end }}
             {{- end }}
@@ -179,8 +191,22 @@ spec:
               {{- else }}
               value: {{ include "digital-contracting-service.issuerDID" . | quote }}
               {{- end }}
+            {{- if .Values.identity.enabled }}
+            # DID identity (DCS_DID is fatal on startup when missing): did.json
+            # is mounted from the Secret the hsm-provision post-install hook
+            # publishes (see the 'identitySecretName' helper).
+            - name: DCS_DID
+              value: {{ printf "%s/did.json" .Values.identity.mountPath | quote }}
+            {{- end }}
             - name: TSA_URL
               value: {{ .Values.signing.tsaURL | quote }}
+            {{- if .Values.signing.tsaTrustCertSecret }}
+            # Trust anchor for verifying RFC3161 tokens issued by an in-cluster
+            # dev TSA (ORCE chart localTSA mode) instead of the compile-time
+            # embedded certs/tsa.crt.
+            - name: TSA_TRUST_CERT_FILE
+              value: /etc/dcs/tsa-trust/tsa-cert.pem
+            {{- end }}
             # ---- IPFS storage -------------------------------------------------------
             - name: IPFS_TENANT_BASE_URL
               {{- if .Values.ipfs.tenantBaseURLSecretRef.name }}
@@ -209,13 +235,13 @@ spec:
             - name: ORCE_ARCHIVE_AUDIT_LOG_URL
               value: {{ $archiveAuditLogURL | quote }}
             - name: ORCE_ARCHIVE_AUDIT_LOG_BEARER_TOKEN
-              {{- if .Values.archiveNotary.auditLogBearerTokenSecretRef.name }}
+              {{- if .Values.global.archiveAuditTokenSecretRef.name }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.archiveNotary.auditLogBearerTokenSecretRef.name | quote }}
-                  key: {{ .Values.archiveNotary.auditLogBearerTokenSecretRef.key | quote }}
+                  name: {{ .Values.global.archiveAuditTokenSecretRef.name | quote }}
+                  key: {{ .Values.global.archiveAuditTokenSecretRef.key | quote }}
               {{- else }}
-              value: {{ .Values.archiveNotary.auditLogBearerToken | quote }}
+              value: {{ .Values.global.archiveAuditToken | quote }}
               {{- end }}
             # ---- PDF-Core (C2PA PDF compiler/verifier) --------------------------
             - name: PDF_CORE_URL
@@ -251,7 +277,7 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if or .Values.customCA.enabled .Values.volumeMounts .Values.pkcs11.provisioning.enabled }}
+          {{- if or .Values.customCA.enabled .Values.volumeMounts .Values.pkcs11.provisioning.enabled .Values.identity.enabled .Values.signing.tsaTrustCertSecret }}
           volumeMounts:
           {{- if .Values.customCA.enabled }}
             - name: custom-ca-certs
@@ -261,6 +287,16 @@ spec:
           {{- if .Values.pkcs11.provisioning.enabled }}
             - name: hsm-token
               mountPath: {{ .Values.pkcs11.provisioning.tokenDir | quote }}
+          {{- end }}
+          {{- if .Values.identity.enabled }}
+            - name: identity
+              mountPath: {{ .Values.identity.mountPath | quote }}
+              readOnly: true
+          {{- end }}
+          {{- if .Values.signing.tsaTrustCertSecret }}
+            - name: tsa-trust
+              mountPath: /etc/dcs/tsa-trust
+              readOnly: true
           {{- end }}
           {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
@@ -291,7 +327,7 @@ spec:
             limits:
               memory: 64Mi
         {{- end }}
-      {{- if or .Values.customCA.enabled .Values.volumes .Values.pkcs11.provisioning.enabled .Values.statusListLocalhostProxy.enabled }}
+      {{- if or .Values.customCA.enabled .Values.volumes .Values.pkcs11.provisioning.enabled .Values.statusListLocalhostProxy.enabled .Values.identity.enabled .Values.signing.tsaTrustCertSecret (and .Values.dss .Values.dss.enabled) }}
       volumes:
       {{- if .Values.customCA.enabled }}
         - name: custom-ca-certs
@@ -307,6 +343,24 @@ spec:
         - name: statuslist-localhost-proxy-config
           configMap:
             name: {{ include "digital-contracting-service.fullname" . }}-statuslist-localhost-proxy
+      {{- end }}
+      {{- if .Values.identity.enabled }}
+        - name: identity
+          secret:
+            secretName: {{ include "digital-contracting-service.identitySecretName" . | quote }}
+            # Published by the hsm-provision post-install hook AFTER the pod is
+            # scheduled. optional lets the pod schedule (the wait-for-hsm-token
+            # initContainer already gates the app until provisioning completes);
+            # required would FailedMount → BackOff before init even runs.
+            optional: true
+      {{- end }}
+      {{- if .Values.signing.tsaTrustCertSecret }}
+        - name: tsa-trust
+          secret:
+            secretName: {{ .Values.signing.tsaTrustCertSecret | quote }}
+            items:
+              - key: tsa-cert.pem
+                path: tsa-cert.pem
       {{- end }}
       {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}

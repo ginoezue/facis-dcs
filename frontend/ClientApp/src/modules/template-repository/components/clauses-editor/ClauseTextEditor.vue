@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import type { DcsContentSegment } from '@/models/dcs-jsonld'
 import SemanticRuleList from '@template-repository/components/clauses-editor/SemanticRuleList.vue'
 import {
   conditionIdsInContent,
@@ -11,16 +10,16 @@ import {
   usedPlaceholderKeysInContent,
 } from '@template-repository/composables/useClauseTextChips'
 import {
-  usePlaceholderDropdownPosition,
   type PlaceholderDropdownMode,
+  usePlaceholderDropdownPosition,
 } from '@template-repository/composables/usePlaceholderDropdownPosition'
-import type { SemanticCondition } from '@template-repository/models/contract-template'
-import { getBlocksFromTemplateData } from '@template-repository/store/dcsDraftStore'
 import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
 import { useTemplateEditorUiStore } from '@template-repository/store/templateEditorUiStore'
 import { semanticParameterLabel } from '@template-repository/utils/semantic-parameter-label'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { DcsContentSegment } from '@/models/dcs-jsonld'
+import type { SemanticCondition } from '@template-repository/models/contract-template'
 
 const PLACEHOLDER_DROPDOWN_MODE: PlaceholderDropdownMode = 'caret'
 
@@ -37,7 +36,7 @@ const emit = defineEmits<{
 const uiStore = useTemplateEditorUiStore()
 const draftStore = useDcsDraftStore()
 const { clausePlaceholderHighlight } = storeToRefs(uiStore)
-const { blocks, subTemplateSnapshots } = storeToRefs(draftStore)
+const { blocks } = storeToRefs(draftStore)
 
 const editorRef = ref<HTMLDivElement | null>(null)
 let valueFromEditor = false
@@ -80,10 +79,7 @@ const unusedConditions = computed(() =>
 )
 const existingClauseConditionIds = computed(() => {
   const ids = new Set<string>()
-  const clauseBlocks = [
-    ...blocks.value,
-    ...subTemplateSnapshots.value.flatMap((subTemplate) => getBlocksFromTemplateData(subTemplate.template_data)),
-  ]
+  const clauseBlocks = blocks.value
 
   for (const block of clauseBlocks) {
     if (block['@type'] !== 'dcs:Clause') continue

@@ -1,7 +1,7 @@
-import type { ContractTemplateState } from '@/types/contract-template-state'
-import type { TemplateType } from '@/types/template-type'
 import type { ContractTemplateResponsible } from './contract-template-responsible'
 import type { DcsTemplateData } from './dcs-jsonld'
+import type { ContractTemplateState } from '@/types/contract-template-state'
+import type { TemplateType } from '@/types/template-type'
 
 export interface ContractTemplate {
   did: string
@@ -23,12 +23,3 @@ export interface ContractTemplate {
 export type PartialContractTemplate = ContractTemplate
 
 export type ContractTemplateData = DcsTemplateData
-
-export interface SubTemplateSnapshot {
-  did: string
-  document_number?: string
-  version: number
-  name?: string
-  description?: string
-  template_data?: DcsTemplateData
-}

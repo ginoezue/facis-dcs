@@ -2,7 +2,10 @@ package command
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -10,7 +13,6 @@ import (
 
 	"digital-contracting-service/internal/base/identity"
 
-	"digital-contracting-service/internal/contractworkflowengine/remotesync/remoteaction"
 	db2 "digital-contracting-service/internal/dcstodcs/db"
 
 	"digital-contracting-service/internal/base/conf"
@@ -18,9 +20,11 @@ import (
 	"digital-contracting-service/internal/base/datatype/componenttype"
 	"digital-contracting-service/internal/base/datatype/userrole"
 	"digital-contracting-service/internal/base/event"
+	"digital-contracting-service/internal/base/validation"
 	"digital-contracting-service/internal/contractworkflowengine/datatype/contractstate"
 	"digital-contracting-service/internal/contractworkflowengine/db"
 	contractevents "digital-contracting-service/internal/contractworkflowengine/event"
+	"digital-contracting-service/internal/contractworkflowengine/negotiationmerging"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -70,28 +74,12 @@ func (h *Negotiator) Handle(ctx context.Context, cmd NegotiationCmd) error {
 		return err
 	}
 
-	if processData.Origin != localPeer && cmd.CauserDID != processData.Origin {
-		/*
-			Not the Origin peer for this contract: forward unchanged instead of
-			mutating locally (single-writer-per-aggregate, see package doc).
-		*/
-
-		err := tx.Commit()
-		if err != nil {
-			return fmt.Errorf("could not commit transaction: %w", err)
-		}
-
-		err = remoteaction.Negotiate.Execute(ctx, h.DB, h.DIDDocument, processData.Origin, processData.DID, cmd)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}
-
-	// Optimistic concurrency: reject if the caller's view of the contract is
-	// older than what's stored (see package doc / ADR-0007).
-	if cmd.UpdatedAt.Unix() < processData.UpdatedAt.Unix() {
+	// Optimistic concurrency (lost-update guard, ADR-0007): reject only if the
+	// contract's CONTENT changed after the caller's view — compare against
+	// content_updated_at, which moves solely on a real contract_data edit, not on
+	// benign writes (a state transition or a background artifact write) that nudge
+	// updated_at without changing content and would otherwise false-trip this.
+	if cmd.UpdatedAt.Unix() < processData.ContentUpdatedAt.Unix() {
 		if localPeer != cmd.CauserDID {
 			return errors.New("contract was updated elsewhere, please force synchronisation and reload")
 		}
@@ -102,13 +90,21 @@ func (h *Negotiator) Handle(ctx context.Context, cmd NegotiationCmd) error {
 		return err
 	}
 
-	isValidNegotiator, err := h.NTRepo.IsValidNegotiator(ctx, tx, cmd.DID, cmd.CauserDID)
-	if err != nil {
-		return fmt.Errorf("could not validate negotiator: %w", err)
-	}
-
-	if !isValidNegotiator {
-		return errors.New("invalid permissions")
+	// Authorization splits on who owns the contract (SRS §4 Contract Negotiation
+	// & Review: the Responder reviews an offered contract and may accept,
+	// negotiate, or refuse it). For an INBOUND offer (Origin != localPeer) this
+	// instance is the Responder/counterparty, and its right to negotiate derives
+	// from being the designated counterparty — not from a local negotiator-task
+	// assignment. Local negotiator RBAC governs only contracts this instance
+	// itself authored (Origin == localPeer).
+	if processData.Origin == localPeer {
+		isValidNegotiator, err := h.NTRepo.IsValidNegotiator(ctx, tx, cmd.DID, cmd.CauserDID)
+		if err != nil {
+			return fmt.Errorf("could not validate negotiator: %w", err)
+		}
+		if !isValidNegotiator {
+			return ErrNotAParty
+		}
 	}
 
 	negotiators, err := h.NTRepo.ReadNegotiatorsForDID(ctx, tx, cmd.DID)
@@ -127,9 +123,72 @@ func (h *Negotiator) Handle(ctx context.Context, cmd NegotiationCmd) error {
 		return fmt.Errorf("could not create negotiation: %w", err)
 	}
 
+	// Ship-proposal-as-PDF-exchange (Arne 2026-07-20): a counter-offer applies its
+	// redline to contract_data immediately, so the negotiated PDF re-renders with
+	// the proposed value and re-ships to the peer over the PDF exchange (ADR-13) —
+	// the peer reviews the redline in the received document and agrees at settle.
+	// Changing the content is what makes the background regenerator produce and
+	// ship a new PDF, growing the C2PA chain on both parties. The change request is
+	// still recorded above for the negotiation audit trail (DCS-IR-CWE-03).
+	// A change request is either free-text (a comment / redline note kept only
+	// for the negotiation audit trail — stored raw above) or a structured
+	// ChangeRequest carrying a contract_data redline. Only a structured redline
+	// is applied immediately and re-shipped as a PDF; a free-text note (which
+	// does not decode into the struct) has nothing to apply, so it is skipped.
+	if cmd.ChangeRequest != nil {
+		var change negotiationmerging.ChangeRequest
+		if err := json.Unmarshal(*cmd.ChangeRequest, &change); err == nil && change.ContractData != nil {
+			proposed := datatype.JSON(*change.ContractData)
+			normalized, err := validation.NormalizeContractDataForPersistence(&proposed, cmd.DID, true)
+			if err != nil {
+				return fmt.Errorf("proposed contract data validation failed: %w", err)
+			}
+			if err := h.CRepo.Update(ctx, tx, db.ContractUpdateData{
+				DID:             cmd.DID,
+				ContractData:    normalized,
+				ContractVersion: processData.ContractVersion + 1,
+			}); err != nil {
+				return fmt.Errorf("could not apply proposed change to contract data: %w", err)
+			}
+		}
+	}
+
 	err = h.NTRepo.ReopenTasks(ctx, tx, cmd.DID)
 	if err != nil {
 		return fmt.Errorf("could not reopen negotiation: %w", err)
+	}
+
+	// Negotiation is where the participating DCS instances are finalized, so it
+	// is where the contract's signature fields are materialized: one
+	// dcs:SignatureField per instance, the AcroForm field the wallet-driven
+	// signing ceremony signs (ADR-12). Without a pre-placed field, the
+	// deterministic two-call remote signing has nothing to sign.
+	contract, err := h.CRepo.ReadDataByDID(ctx, tx, cmd.DID)
+	if err != nil {
+		return fmt.Errorf("could not read contract for signature-field seeding: %w", err)
+	}
+	seeded, changed, err := seedSignatureFields(*contract.ContractData, contract.Responsible.GetParties())
+	if err != nil {
+		return fmt.Errorf("could not seed signature fields: %w", err)
+	}
+	if changed {
+		if err := h.CRepo.Update(ctx, tx, db.ContractUpdateData{DID: cmd.DID, ContractData: &seeded}); err != nil {
+			return fmt.Errorf("could not persist seeded signature fields: %w", err)
+		}
+	}
+
+	// The Responder choosing to negotiate an offered contract starts the
+	// negotiation phase (SRS §4; transition.go Offered -> Negotiation via
+	// EventNegotiate). Later redlines happen within NEGOTIATION (a self-loop) and
+	// leave the state unchanged.
+	currentState := contractstate.ContractState(processData.State)
+	if currentState == contractstate.Offered {
+		if err := contractstate.ValidateOutcome(currentState, contractstate.EventNegotiate, contractstate.Negotiation); err != nil {
+			return err
+		}
+		if err := h.CRepo.UpdateState(ctx, tx, cmd.DID, contractstate.Negotiation.String()); err != nil {
+			return fmt.Errorf("could not persist negotiation state: %w", err)
+		}
 	}
 
 	evt := contractevents.NegotiationEvent{
@@ -148,4 +207,57 @@ func (h *Negotiator) Handle(ctx context.Context, cmd NegotiationCmd) error {
 	}
 
 	return tx.Commit()
+}
+
+// seedSignatureFields adds one dcs:SignatureField per participating DCS
+// instance to the contract document, its dcs:signatoryName set to that
+// instance's DID — the value pdf-core renders as the AcroForm field's /T name,
+// which the wallet-driven signing ceremony targets (ADR-12). An explicit
+// declaration wins: a contract that already declares any signature fields is
+// signed against exactly those and is left untouched, so an authored
+// multi-signatory contract is never augmented. Otherwise it auto-seeds one
+// field per instance and is idempotent — re-running over its own output adds
+// nothing. It reports whether the document changed so the caller only persists
+// real additions.
+func seedSignatureFields(raw datatype.JSON, instanceDIDs []string) (datatype.JSON, bool, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, false, fmt.Errorf("decode contract data: %w", err)
+	}
+
+	fields, _ := doc["dcs:signatureFields"].([]any)
+	// Explicit declaration wins: a contract that already declares its signature
+	// fields (e.g. a multi-signatory contract naming each signer) is signed
+	// against exactly those, so the per-party auto-seed does not add an extra
+	// instance-DID field on top of them.
+	if len(fields) > 0 {
+		return raw, false, nil
+	}
+
+	present := map[string]bool{}
+	docID, _ := doc["@id"].(string)
+	changed := false
+	for _, did := range instanceDIDs {
+		if present[did] {
+			continue
+		}
+		digest := sha256.Sum256([]byte(did))
+		fields = append(fields, map[string]any{
+			"@id":               fmt.Sprintf("%s#signature-field-%s", docID, hex.EncodeToString(digest[:8])),
+			"@type":             "dcs:SignatureField",
+			"dcs:signatoryName": did,
+		})
+		present[did] = true
+		changed = true
+	}
+	if !changed {
+		return raw, false, nil
+	}
+
+	doc["dcs:signatureFields"] = fields
+	encoded, err := datatype.NewJSON(doc)
+	if err != nil {
+		return nil, false, fmt.Errorf("encode contract data: %w", err)
+	}
+	return encoded, true, nil
 }

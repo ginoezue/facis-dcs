@@ -2,8 +2,8 @@
 
 ## Roles
 
-Every DCS user holds one or more of the following roles, assigned via
-Keycloak and disclosed at login as a verifiable credential claim
+Every DCS user holds one or more of the following roles, disclosed at
+login as a verifiable credential claim
 (`backend/internal/base/datatype/userrole/userrole.go`, SRS Tables 4/5):
 
 | Role | What it can do |
@@ -91,9 +91,13 @@ From a contract's detail view, "Export Bundle" downloads a single ZIP
 containing the contract's JSON-LD document, the signed PDF, embedded VCs,
 C2PA manifests, deployment evidence, and — for a child contract in a
 frame-agreement hierarchy — the parent chain up to the frame document
-(never sibling contracts; see ADR-7). Every file's SHA-256 is listed in
-`bundle-manifest.json`; export is refused with a findings list rather than
-a partial ZIP if a referenced component is missing.
+under `parents/`. Other members of the hierarchy family (e.g. sibling
+contracts under the same frame) appear under `related/` when this instance
+holds them and you could open them yourself; contracts held only by other
+instances or outside your read authorization are simply absent (see
+ADR-7). Every file's SHA-256 is listed in `bundle-manifest.json`; export
+is refused with a findings list rather than a partial ZIP if a referenced
+component is missing.
 
 ## Auditing
 

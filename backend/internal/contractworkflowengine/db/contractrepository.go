@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -17,6 +18,12 @@ type Responsible struct {
 	Approvers   []string `json:"approvers"`
 	Reviewers   []string `json:"reviewers"`
 	Negotiators []string `json:"negotiators"`
+	// Counterparty is the single peer DCS this contract is offered to and
+	// negotiated with (ADR-13). It is NOT a role assignment — reviewer/approver/
+	// negotiator are internal RBAC roles held by local users, never peer DIDs.
+	// Origin + Counterparty are the two parties (GetParties): the PDF ship
+	// targets and the signature-field slots.
+	Counterparty string `json:"counterparty"`
 }
 
 func ToResponsible(raw any) (*Responsible, error) {
@@ -57,51 +64,18 @@ func (r *Responsible) Scan(src any) error {
 	return json.Unmarshal(b, r)
 }
 
-func (r *Responsible) GetResponsibleSet() map[string]struct{} {
-	set := make(map[string]struct{}, 1+len(r.Approvers)+len(r.Reviewers)+len(r.Negotiators))
-
-	if r.Creator != "" {
-		set[r.Creator] = struct{}{}
-	}
-	for _, did := range r.Approvers {
-		set[did] = struct{}{}
-	}
-	for _, did := range r.Reviewers {
-		set[did] = struct{}{}
-	}
-	for _, did := range r.Negotiators {
-		set[did] = struct{}{}
-	}
-
-	return set
-}
-
-func (r *Responsible) GetUniqueResponsibleList() []string {
-	set := make(map[string]struct{})
-	var result []string
-
-	add := func(did string) {
-		if did == "" {
-			return
-		}
-		if _, exists := set[did]; !exists {
-			set[did] = struct{}{}
-			result = append(result, did)
+// GetParties returns the contract's two DCS parties — the origin (creator) and
+// the counterparty — deduplicated, empty entries dropped. These are the PDF
+// ship targets and the slots the AcroForm signature fields are seeded for
+// (ADR-13); they are distinct from the internal RBAC role lists.
+func (r *Responsible) GetParties() []string {
+	parties := make([]string, 0, 2)
+	for _, did := range []string{r.Creator, r.Counterparty} {
+		if did != "" && !slices.Contains(parties, did) {
+			parties = append(parties, did)
 		}
 	}
-
-	add(r.Creator)
-	for _, did := range r.Approvers {
-		add(did)
-	}
-	for _, did := range r.Reviewers {
-		add(did)
-	}
-	for _, did := range r.Negotiators {
-		add(did)
-	}
-
-	return result
+	return parties
 }
 
 type Contract struct {
@@ -149,6 +123,11 @@ type ContractMetadata struct {
 	// from contract_archive_entries.evidence); it is nil for the
 	// non-archive metadata queries that share this struct.
 	Evidence *datatype.JSON `db:"evidence"`
+	// ArchiveSummary/ArchiveTags carry the archive entry's annotation
+	// (DCS-FR-CSA-11); like Evidence they are only populated by the
+	// archived-contracts queries.
+	ArchiveSummary *string        `db:"archive_summary"`
+	ArchiveTags    *datatype.JSON `db:"archive_tags"`
 }
 
 type ContractProcessData struct {
@@ -158,10 +137,14 @@ type ContractProcessData struct {
 	State           string     `db:"state"`
 	CreatedBy       string     `db:"created_by"`
 	UpdatedAt       time.Time  `db:"updated_at"`
-	StartDate       *time.Time `db:"start_date"`
-	ExpDate         *time.Time `db:"exp_date"`
-	ExpPolicy       *string    `db:"exp_policy"`
-	ExpNoticePeriod *int       `db:"exp_notice_period"`
+	// ContentUpdatedAt moves only when contract_data actually changes, so the
+	// optimistic-lock guard distinguishes a real concurrent content edit from a
+	// benign write that merely nudged updated_at.
+	ContentUpdatedAt time.Time  `db:"content_updated_at"`
+	StartDate        *time.Time `db:"start_date"`
+	ExpDate          *time.Time `db:"exp_date"`
+	ExpPolicy        *string    `db:"exp_policy"`
+	ExpNoticePeriod  *int       `db:"exp_notice_period"`
 }
 
 type ContractUpdateData struct {
@@ -226,6 +209,10 @@ type SearchValues struct {
 	Name            string
 	Description     string
 	ContractData    string
+	// Tag filters archived contracts by an assigned annotation tag
+	// (DCS-FR-CSA-11); only meaningful for the archive queries, whose
+	// backing view exposes archive_tags.
+	Tag string
 	// ParentDID is the full-scope hierarchy filter: when
 	// set, only contracts whose dcs:parentContract references this DID are
 	// returned. It is a reverse-index QUERY over children the instance
@@ -247,9 +234,30 @@ type ContractRepo interface {
 	ReadHistoryByDID(ctx context.Context, tx *sqlx.Tx, did string) ([]ContractHistory, error)
 	ReadDataByDID(ctx context.Context, tx *sqlx.Tx, did string) (*Contract, error)
 	ExistsByDID(ctx context.Context, tx *sqlx.Tx, did string) (bool, error)
+	// ReadChildrenDIDs returns the DIDs of all locally-known contracts whose
+	// dcs:parentContract references did, ordered by did.
+	ReadChildrenDIDs(ctx context.Context, tx *sqlx.Tx, did string) ([]string, error)
 	ReadExpiredContracts(ctx context.Context, tx *sqlx.Tx) ([]ContractMetadata, error)
 	StoreArchiveEntry(ctx context.Context, tx *sqlx.Tx, data ContractArchiveEntry) error
 	ReadArchiveEntries(ctx context.Context, tx *sqlx.Tx) ([]ContractArchiveEntry, error)
+	// MarkArchiveEntryDeleted soft-deletes every not-yet-deleted archive
+	// entry for did (DCS-FR-CSA-17): sets deleted_at/deleted_by/
+	// deletion_reason rather than removing the row, so the evidence stays
+	// discoverable for compliance/dispute resolution. Returns the number of
+	// entries marked (0 if did has no archive entries, or all its entries
+	// were already deleted).
+	MarkArchiveEntryDeleted(ctx context.Context, tx *sqlx.Tx, did string, deletedBy string, reason string) (int, error)
+	// AnnotateArchiveEntry sets the summary and (when tags is non-nil,
+	// replacing the whole set) the tags of every not-deleted archive entry
+	// for did (DCS-FR-CSA-11). Only the annotation columns are touched —
+	// the entry's snapshot/evidence stay immutable. Returns the number of
+	// entries annotated (0 if did has no live archive entries).
+	AnnotateArchiveEntry(ctx context.Context, tx *sqlx.Tx, did string, summary string, tags *datatype.JSON) (int, error)
+	// ReadSignedSignatureFieldNames returns the field names of all SIGNED
+	// (non-revoked) signatures on the contract — the deploy gate compares
+	// them against the contract document's declared signatureFields
+	// (DCS-FR-SM-07/-17, DCS-NFR-BR-03).
+	ReadSignedSignatureFieldNames(ctx context.Context, tx *sqlx.Tx, did string) ([]string, error)
 	ReadArchivedContracts(ctx context.Context, tx *sqlx.Tx) ([]ContractMetadata, error)
 	ReadArchivedContractsByFilter(ctx context.Context, tx *sqlx.Tx, values SearchValues) ([]ContractMetadata, error)
 	ReadProcessDataByDID(ctx context.Context, tx *sqlx.Tx, did string) (*ContractProcessData, error)

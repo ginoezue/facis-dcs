@@ -1,12 +1,13 @@
 """Contract service API client for test steps."""
 
+import os
+
 import requests
 
 from steps.support.api_client import (
     contract_create_url,
     contract_retrieve_by_id_url,
     contract_submit_url,
-    contract_verify_url,
     get_with_headers,
     post_json,
     template_approve_url,
@@ -53,6 +54,46 @@ class ContractService:
         return context.local_peer_did_cache
 
     @staticmethod
+    def _other_trusted_peer_did(context):
+        """DID of instance B (dcs2), pre-seeded as a mutually trusted peer of
+        this instance via DCS_TRUSTED_PEERS (deployment/helm/values.bdd.yml) —
+        needed so that CheckForUntrustedPeers (backend/internal/service/
+        contract_workflow_engine.go Create()) accepts it as a
+        reviewer/negotiator/approver DID.
+
+        Used as a stand-in for "a different, legitimate party that is NOT
+        this instance": registering it (instead of this instance's own DID,
+        see _local_peer_did) as a contract's sole reviewer/negotiator/
+        approver exercises the party-scoping denial path (FR-CWE-18,
+        IsValidNegotiator in acceptnegotiation.go/negotiate.go/
+        rejectnegotiation.go) without an actual live round-trip to instance B
+        — negotiate/respond calls made by THIS instance's own JWT-authenticated
+        users always resolve, server-side, to this instance's own peer DID
+        (CauserDID = s.DIDDocument.GetID(), see internal/service/
+        contract_workflow_engine.go), never to instance B's.
+        """
+        if not hasattr(context, "other_trusted_peer_did_cache"):
+            from steps.support.api_client import did_document_url  # noqa: PLC0415
+
+            base_url_b = os.getenv("BDD_DCS_BASE_URL_B", "").strip()
+            assert base_url_b, (
+                "BDD_DCS_BASE_URL_B must be set (two-instance kind harness, "
+                "tests/bdd/scripts/run_bdd_helm.sh) to resolve a second trusted peer DID"
+            )
+            resp = requests.get(
+                did_document_url(base_url_b),
+                timeout=context.http_timeout_seconds,
+            )
+            assert resp.status_code == 200, (
+                f"could not fetch instance B's own did:web document: "
+                f"{resp.status_code} {resp.text}"
+            )
+            did = resp.json().get("id")
+            assert did, f"instance B did.json response has no 'id' field: {resp.text}"
+            context.other_trusted_peer_did_cache = did
+        return context.other_trusted_peer_did_cache
+
+    @staticmethod
     def _template_submit_payload(context, did: str, updated_at: str) -> dict:
         AuthService.get_headers_for_roles(["Template Reviewer"])
         AuthService.get_headers_for_roles(["Template Approver"])
@@ -79,9 +120,6 @@ class ContractService:
         return {
             "did": did,
             "updated_at": updated_at,
-            "reviewers": [peer_did],
-            "approvers": [peer_did],
-            "negotiators": [peer_did],
         }
 
     @staticmethod
@@ -103,33 +141,7 @@ class ContractService:
                 "template_type": TemplateService.CONTRACT_TEMPLATE_TYPE,
                 "name": "BDD Contract Source Template",
                 "description": "BDD template for contract workflows",
-                "template_data": {
-                    "@context": {"dcs": "https://w3id.org/facis/dcs/ontology/v1#"},
-                    "@type": "dcs:ContractTemplate",
-                    "dcs:metadata": {
-                        "@type": "dcs:TemplateMetadata",
-                        "dcs:title": "BDD Contract Source Template",
-                    },
-                    "dcs:documentStructure": {
-                        "@type": "dcs:DocumentStructure",
-                        "dcs:blocks": {
-                            "@list": [
-                                {
-                                    "@id": "urn:uuid:block-clause-1",
-                                    "@type": "dcs:Clause",
-                                    "dcs:content": {"@list": ["Base clause"]},
-                                }
-                            ]
-                        },
-                        "dcs:layout": [
-                            {
-                                "@id": "urn:uuid:block-root",
-                                "dcs:isRoot": True,
-                                "dcs:children": {"@list": [{"@id": "urn:uuid:block-clause-1"}]},
-                            }
-                        ],
-                    },
-                },
+                "template_data": TemplateService.canonical_document_data("BDD Contract Source Template"),
             },
             headers=creator_h,
         )
@@ -203,9 +215,6 @@ class ContractService:
         peer_did = ContractService._local_peer_did(context)
         create_payload = {
             "template_did": t_did,
-            "reviewers": [peer_did],
-            "negotiators": [peer_did],
-            "approvers": [peer_did],
         }
         create_resp = post_json(context, contract_create_url(context), create_payload, headers=creator_h)
         assert create_resp.status_code == 200, create_resp.text
@@ -228,9 +237,6 @@ class ContractService:
         peer_did = ContractService._local_peer_did(context)
         create_payload = {
             "template_did": t_did,
-            "reviewers": [peer_did],
-            "negotiators": [peer_did],
-            "approvers": [peer_did],
         }
         create_resp = post_json(context, contract_create_url(context), create_payload, headers=creator_h)
         assert create_resp.status_code == 200, create_resp.text
@@ -257,14 +263,58 @@ class ContractService:
         context.contract_updated_at[contract_name] = updated_at
         context.contract_seed_headers[contract_name] = creator_h
 
+    @staticmethod
+    def _create_contract_excluding_local_peer(context, contract_name: str):
+        """Like _create_contract_in_negotiation, but registers instance B's
+        DID (see _other_trusted_peer_did) as the sole reviewer/negotiator/
+        approver instead of this instance's own DID — this instance is
+        therefore NOT a party to the resulting contract. Used by the
+        "non-party" negotiation-denial scenarios (FR-CWE-18).
+        """
+        t_did = ContractService._create_approved_template_for_contract(context)
+        creator_h = AuthService.get_headers_for_roles(["Contract Creator"])
+        other_peer_did = ContractService._other_trusted_peer_did(context)
+        create_payload = {
+            "template_did": t_did,
+            "counterparty": other_peer_did,
+        }
+        create_resp = post_json(context, contract_create_url(context), create_payload, headers=creator_h)
+        assert create_resp.status_code == 200, create_resp.text
+        c_did = create_resp.json().get("did")
+
+        retrieve_resp = get_with_headers(context, contract_retrieve_by_id_url(context, c_did), headers=creator_h)
+        assert retrieve_resp.status_code == 200, retrieve_resp.text
+        updated_at = retrieve_resp.json().get("updated_at")
+
+        submit_payload = {
+            "did": c_did,
+            "updated_at": updated_at,
+            "counterparty": other_peer_did,
+        }
+        submit_resp = post_json(context, contract_submit_url(context), submit_payload, headers=creator_h)
+        assert submit_resp.status_code == 200, submit_resp.text
+
+        retrieve_resp = get_with_headers(context, contract_retrieve_by_id_url(context, c_did), headers=creator_h)
+        assert retrieve_resp.status_code == 200, retrieve_resp.text
+        assert retrieve_resp.json().get("state") == "NEGOTIATION", (
+            f'Contract should be in NEGOTIATION state, but it is {retrieve_resp.json().get("state")}'
+        )
+        updated_at = retrieve_resp.json().get("updated_at")
+
+        ContractService._ensure_store(context, "contract_dids", {})
+        ContractService._ensure_store(context, "contract_updated_at", {})
+        ContractService._ensure_store(context, "contract_seed_headers", {})
+        context.contract_dids[contract_name] = c_did
+        context.contract_updated_at[contract_name] = updated_at
+        context.contract_seed_headers[contract_name] = creator_h
 
     @staticmethod
     def _create_approved_template_with_signature_field(context, signatory_name: str) -> str:
         """Like _create_approved_template_for_contract, but the template
         declares a named `dcs:signatureFields` entry (dcs:SignatureField,
         dcs:signatoryName) — the field pdf-core's PAdES signer is expected to
-        bind its /T AcroForm field name to (docs/anforderung.md B1: "existing
-        signature field by name (/T == signatoryName from the JSON-LD)").
+        bind its /T AcroForm field name to (the signer signs an existing
+        signature field by name: /T == signatoryName from the JSON-LD).
         See docs/semantic-ontology/linkml/tests/valid/signature-fields.jsonld
         for the schema shape this mirrors.
         """
@@ -277,12 +327,7 @@ class ContractService:
                 "name": "BDD Signature-Field Source Template",
                 "description": "BDD template for real-signing-vertical scenarios",
                 "template_data": {
-                    "@context": {"dcs": "https://w3id.org/facis/dcs/ontology/v1#"},
-                    "@type": "dcs:ContractTemplate",
-                    "dcs:metadata": {
-                        "@type": "dcs:TemplateMetadata",
-                        "dcs:title": "BDD Signature-Field Source Template",
-                    },
+                    **TemplateService.canonical_document_data("BDD Signature-Field Source Template"),
                     "dcs:signatureFields": [
                         {
                             "@id": "urn:uuid:sig-field-1",
@@ -290,25 +335,6 @@ class ContractService:
                             "dcs:signatoryName": signatory_name,
                         }
                     ],
-                    "dcs:documentStructure": {
-                        "@type": "dcs:DocumentStructure",
-                        "dcs:blocks": {
-                            "@list": [
-                                {
-                                    "@id": "urn:uuid:block-clause-1",
-                                    "@type": "dcs:Clause",
-                                    "dcs:content": {"@list": ["Base clause"]},
-                                }
-                            ]
-                        },
-                        "dcs:layout": [
-                            {
-                                "@id": "urn:uuid:block-root",
-                                "dcs:isRoot": True,
-                                "dcs:children": {"@list": [{"@id": "urn:uuid:block-clause-1"}]},
-                            }
-                        ],
-                    },
                 },
             },
             headers=creator_h,
@@ -377,7 +403,7 @@ class ContractService:
         """Like _create_contract_in_draft, but sourced from a template that
         carries a named dcs:SignatureField (see
         _create_approved_template_with_signature_field) — used by the
-        real-signing-vertical (Workstream B) scenarios that assert on the
+        real-signing-vertical scenarios that assert on the
         PAdES-signed PDF's AcroForm /T field name.
         """
         t_did = ContractService._create_approved_template_with_signature_field(context, signatory_name)
@@ -385,9 +411,6 @@ class ContractService:
         peer_did = ContractService._local_peer_did(context)
         create_payload = {
             "template_did": t_did,
-            "reviewers": [peer_did],
-            "negotiators": [peer_did],
-            "approvers": [peer_did],
         }
         create_resp = post_json(context, contract_create_url(context), create_payload, headers=creator_h)
         assert create_resp.status_code == 200, create_resp.text
@@ -422,6 +445,9 @@ class ContractService:
 
     @staticmethod
     def _prepare_contract_under_review(context, contract_name: str):
+        # Refresh first: async writers (the PDF/C2PA pipeline) may have
+        # touched the row since the cached updated_at was taken.
+        ContractService._refresh_contract(context, contract_name)
         did, updated_at = ContractService._contract_data(context, contract_name)
         creator_h = context.contract_seed_headers[contract_name]
         submit_to_negotiation = post_json(
@@ -450,19 +476,10 @@ class ContractService:
         did, _ = ContractService._contract_data(context, contract_name)
         ContractService._prepare_contract_under_review(context, contract_name)
 
+        # POST /contract/verify was removed (commit 2712047e, "Remove unneeded
+        # code") — validation now runs server-side inside submit, so the
+        # reviewer submit no longer needs a prior verify call.
         reviewer_h = AuthService.get_headers_for_roles(["Contract Reviewer"])
-        retrieve = get_with_headers(context, contract_retrieve_by_id_url(context, did), headers=reviewer_h)
-        assert retrieve.status_code == 200, retrieve.text
-        updated_at = retrieve.json().get("updated_at")
-
-        verify = post_json(
-            context,
-            contract_verify_url(context),
-            {"did": did, "updated_at": updated_at},
-            headers=reviewer_h,
-        )
-        assert verify.status_code == 200, verify.text
-
         retrieve = get_with_headers(context, contract_retrieve_by_id_url(context, did), headers=reviewer_h)
         assert retrieve.status_code == 200, retrieve.text
         updated_at = retrieve.json().get("updated_at")

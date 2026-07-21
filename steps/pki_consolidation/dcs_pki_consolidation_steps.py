@@ -1,22 +1,13 @@
-"""BDD step definitions for the pki-consolidation-pkcs11 requirement
-(Workstream A, docs/anforderung.md Zeilen 93-144).
+"""BDD step definitions for PKI consolidation
+(features/21_pki_consolidation_pkcs11; SRS DCS-IR-HI-01, DCS-NFR-SEC-02,
+DCS-OR-C2PA-007).
 
-Covers only the BDD-testable ACs (AC1, AC2, AC3, AC4, AC5, AC6, AC11, AC12).
-AC10 is @skip in the feature file (no real runtime call site exists yet - see
-the feature file's header comment). AC7 (extern-validiert), AC8/AC9/AC15
-(grep-gate), AC13/AC14 (manueller-Drill) are deliberately NOT implemented
-here.
-
-Several scenarios (AC6, AC11, AC12) are written against ASSUMED endpoint
-contracts / DB seams that do not exist in the codebase yet - each is
-documented at its point of use with the exact grep/search that came up
-empty, so a reader can tell "not yet designed" apart from "implemented
-wrong". This mirrors the established precedent in
-features/19_c2pa_conformance/c2pa_conformance.feature and
-steps/peer_trust/dcs_peer_trust_steps.py for pre-design BDD packs.
+The swappable trust-anchor scenario (DCS_TRUST_ANCHORS) is @skip in the
+feature file - see its inline comment. The CRL-revocation and key-rotation
+scenarios seed their preconditions directly via the test DB connection
+(context.db); each seam is documented at its point of use.
 """
 
-import base64
 import json
 import os
 
@@ -26,7 +17,6 @@ from behave import given, then, when
 from jwt.algorithms import ECAlgorithm
 
 from steps.support.api_client import (
-    c2pa_internal_sign_url,
     did_document_url,
     get_with_headers,
     post_json,
@@ -38,7 +28,7 @@ from steps.support.services.contract_service import ContractService
 
 
 # ---------------------------------------------------------------------------
-# AC1 / AC2 - this instance's own DID document
+# This instance's own DID document
 # ---------------------------------------------------------------------------
 
 
@@ -66,9 +56,8 @@ def step_then_did_jwk_is_ec_p256(context):
         f"Expected the DID key's publicKeyJwk.crv to be 'P-256', got: {jwk}"
     )
     assert "n" not in jwk and "e" not in jwk, (
-        "DID key's publicKeyJwk still carries RSA fields ('n'/'e') alongside/instead of "
-        f"EC fields - the legacy identity.PublicKeyJWK{{Kty, N, E}} struct has not been "
-        f"migrated to EC (x/y): {jwk}"
+        "DID key's publicKeyJwk carries RSA fields ('n'/'e') alongside/instead of "
+        f"the EC (x/y) fields the P-256 dcs-did key publishes: {jwk}"
     )
     assert jwk.get("x") and jwk.get("y"), (
         f"Expected EC JWK 'x' and 'y' coordinates to be present, got: {jwk}"
@@ -76,7 +65,7 @@ def step_then_did_jwk_is_ec_p256(context):
 
 
 # ---------------------------------------------------------------------------
-# AC3 - OpenID4VP JAR, ES256-signed by the dcs-oid4vp-jar HSM key
+# OpenID4VP JAR, ES256-signed by the dcs-oid4vp-jar HSM key
 # ---------------------------------------------------------------------------
 
 
@@ -153,7 +142,7 @@ def step_then_jar_kid_names_hsm_label(context):
 
 
 # ---------------------------------------------------------------------------
-# AC4 - Contract-Lifecycle-VC proof is ECDSA/ES256, not Ed25519Signature2020
+# Contract-Lifecycle-VC proof is ECDSA/ES256, not Ed25519Signature2020
 # ---------------------------------------------------------------------------
 
 
@@ -173,8 +162,8 @@ def step_then_vc_proof_is_ecdsa(context, name):
     # library is required.
     assert b"Ed25519Signature2020" not in pdf_bytes, (
         f"Exported PDF for contract '{name}' still embeds a VC proof of type "
-        "'Ed25519Signature2020' - the PKI consolidation refactor (docs/anforderung.md "
-        "Workstream A2.2) requires an ECDSA-based proof suite instead"
+        "'Ed25519Signature2020' - the HSM-backed VC signer (DCS-IR-HI-01) "
+        "requires an ECDSA-based proof suite instead"
     )
     lowered = pdf_bytes.lower()
     assert b"es256" in lowered or b"ecdsa" in lowered, (
@@ -186,7 +175,7 @@ def step_then_vc_proof_is_ecdsa(context, name):
 
 
 # ---------------------------------------------------------------------------
-# AC5 - two-instance: both instances publish an EC P-256 DID key
+# Two-instance: both instances publish an EC P-256 DID key
 #
 # The Given/When/Then steps for "instance A and instance B are both running
 # and trust each other", "the initiator on instance A creates and offers a
@@ -213,60 +202,16 @@ def step_then_both_instances_publish_ec_p256(context):
         )
         jwk = verification_methods[0].get("publicKeyJwk") or {}
         assert jwk.get("kty") == "EC" and jwk.get("crv") == "P-256", (
-            f"Expected instance {label}'s DID key to be ECDSA P-256 (AC5/A2.4 is a "
+            f"Expected instance {label}'s DID key to be ECDSA P-256 (this is a "
             "breaking change: both instances must switch to the HSM-backed ECDSA DID "
             f"signer simultaneously), got kty={jwk.get('kty')!r} crv={jwk.get('crv')!r}"
         )
 
 
 # ---------------------------------------------------------------------------
-# AC6 - new authenticated C2PA-signing endpoint (ASSUMED contract) + full
-# export's COSE alg
+# Full export's COSE alg (pdf-core embeds ES256 COSE_Sign1; the DCS signs the
+# Sig_structure with the dcs-c2pa key and pdf-core embeds it — pdf-core is keyless)
 # ---------------------------------------------------------------------------
-
-
-@when(
-    "I request an ES256 C2PA signature for a COSE Sig_structure payload from the "
-    "new internal signing endpoint"
-)
-def step_when_request_c2pa_signature(context):
-    # A minimal, syntactically-plausible COSE Sig_structure ("Signature1"
-    # array, see pdf-core/compiler/compiler_c2pa.go:630-638) - the exact
-    # bytes do not matter for this scenario (the endpoint is expected to sign
-    # whatever bytes it is given), only that the response is a well-formed
-    # ES256 signature over them.
-    sig_structure = base64.b64encode(b"bdd-pki-consolidation-sig-structure-fixture").decode()
-    context.requests_response = post_json(
-        context,
-        c2pa_internal_sign_url(context),
-        {"sig_structure": sig_structure},
-        headers=getattr(context, "headers", {}),
-    )
-
-
-@then("the returned signature is a well-formed 64-byte ES256 (r||s) signature")
-def step_then_signature_is_well_formed_es256(context):
-    body = context.requests_response.json()
-    signature_b64 = body.get("signature")
-    assert signature_b64, (
-        f"Expected a 'signature' field in the C2PA signing endpoint response, got: {body}"
-    )
-    signature_bytes = base64.b64decode(signature_b64)
-    # ES256 raw JOSE/COSE signatures are exactly 64 bytes (32-byte r || 32-byte
-    # s) - distinct from the DER-encoded ASN.1 signature crypto11's
-    # crypto.Signer would return by default and from an Ed25519 signature
-    # (which happens to also be 64 bytes, but is a fundamentally different
-    # scheme - this check only confirms SHAPE, not scheme; full end-to-end
-    # scheme proof is AC6's second scenario, the COSE alg check below, which
-    # inspects a real signed manifest rather than this isolated endpoint).
-    assert len(signature_bytes) == 64, (
-        f"Expected a 64-byte raw r||s ES256 signature, got {len(signature_bytes)} bytes"
-    )
-    # NOTE (open point for architect): this isolated endpoint response does
-    # not (yet) carry the public key/certificate needed to cryptographically
-    # verify this specific signature from the BDD harness. Consider having
-    # the endpoint also return the public JWK or x5chain used, so this
-    # scenario can do a full verify rather than a shape-only check.
 
 
 @then("the exported PDF's C2PA COSE_Sign1 protected header declares alg ES256(-7), not EdDSA(-8)")
@@ -290,7 +235,7 @@ def step_then_cose_alg_is_es256(context):
     assert eddsa_marker not in pdf_bytes, (
         "Exported PDF's C2PA manifest still declares COSE alg EdDSA(-8) "
         f"(found protected-header byte pattern {eddsa_marker!r}) - the PKI consolidation "
-        "refactor (docs/anforderung.md Workstream A2.3) requires ES256(-7) instead"
+        "refactor requires ES256(-7) instead"
     )
     assert es256_marker in pdf_bytes, (
         "Exported PDF's C2PA manifest does not declare COSE alg ES256(-7) "
@@ -301,20 +246,14 @@ def step_then_cose_alg_is_es256(context):
 
 
 # ---------------------------------------------------------------------------
-# AC11 - CRL revocation flips a previously valid signature to invalid
+# CRL revocation flips a previously valid signature to invalid
 #
-# NOTE: there is no dev CA / CRL infrastructure in this codebase yet at all
-# (`grep -rn "CRL" backend/internal/signingmanagement` returns nothing at the
-# time this pack was written - Workstream A3/A5 have not landed). The Given
-# step below seeds an ASSUMED persistence point (a new `cert_revoked_at`
-# column on the existing `contract_signatures` table, extending rather than
-# inventing an unrelated table) directly via context.db, mirroring the
-# already-accepted `_seed_trusted_peer` (steps/peer_trust/
-# dcs_peer_trust_steps.py) and exp_date-backdating (steps/template_management/
-# contract_state_machine_steps.py) precedents for test-only DB seams. If the
-# implementer instead models CRL revocation via a serial-number-keyed table
-# (closer to how a real X.509 CRL works), only this Given step's SQL needs to
-# be re-pointed - the Then assertions are the requirement-accurate,
+# The Given step below seeds the revocation marker (the `cert_revoked_at`
+# column on `contract_signatures`) directly via context.db, mirroring the
+# accepted `_seed_trusted_peer` (steps/peer_trust/dcs_peer_trust_steps.py)
+# and exp_date-backdating (steps/template_management/
+# contract_state_machine_steps.py) precedents for test-only DB seams. The
+# Then assertions on /signature/validate are the requirement-accurate,
 # load-bearing part.
 # ---------------------------------------------------------------------------
 
@@ -352,10 +291,8 @@ def step_given_cert_revoked_in_crl(context, name):
     except Exception as exc:  # noqa: BLE001
         context.db.rollback()
         raise AssertionError(
-            "Could not seed the AC11 CRL-revocation test seam: this assumes a "
-            "'cert_revoked_at' column on 'contract_signatures' that does not exist yet "
-            f"(docs/anforderung.md Workstream A5 - see this step's module docstring for "
-            f"the full rationale): {exc}"
+            "Could not seed the CRL-revocation test seam (the 'cert_revoked_at' "
+            f"column on 'contract_signatures'): {exc}"
         ) from exc
     finally:
         cursor.close()
@@ -388,20 +325,17 @@ def step_then_validate_reports_cert_revoked(context, name):
 
 
 # ---------------------------------------------------------------------------
-# AC12 - key rotation: old signature stays valid, new signature uses the new
-# key, distinguishably
+# Key rotation: old signature stays valid, new signature uses the new key,
+# distinguishably
 #
-# NOTE: key rotation is explicitly an OPS action (a script or Helm Job, per
-# docs/anforderung.md Workstream A5's own rotation procedure) - it is not
-# triggerable via any HTTP endpoint by design, and there is no versioned-
-# key-label mechanism in the codebase yet at all (`grep -rn "key_version\|
-# active_version" backend/` returns nothing). The Given step below seeds an
-# ASSUMED settings row directly via context.db; the Then assertions read an
-# ASSUMED 'key_version' field from GET /signature/retrieve/{did}, which also
-# does not exist yet. Both are open points for whatever exact schema A5
-# lands with - the important, requirement-accurate claim under test is "old
-# and new signatures are distinguishable by key version, and the old one
-# keeps validating".
+# Key rotation is an OPS action (scripts/rotate-hsm-key.sh) - it is not
+# triggerable via any HTTP endpoint by design. The Given step below moves
+# the active key-version pointer (the 'pki_active_key_version' settings
+# table, backend/migrations/sql/20260709b_pki_key_versioning.sql) directly
+# via context.db; the Then assertions read the 'key_version' field from
+# GET /signature/retrieve/{did}. The requirement-accurate claim under test
+# is "old and new signatures are distinguishable by key version, and the
+# old one keeps validating".
 # ---------------------------------------------------------------------------
 
 
@@ -419,10 +353,8 @@ def step_given_rotate_key_version(context):
     except Exception as exc:  # noqa: BLE001
         context.db.rollback()
         raise AssertionError(
-            "Could not seed the AC12 key-rotation test seam: this assumes a "
-            "'pki_active_key_version' settings table that does not exist yet "
-            f"(docs/anforderung.md Workstream A5 - see this step's module docstring for "
-            f"the full rationale): {exc}"
+            "Could not seed the key-rotation test seam (the "
+            f"'pki_active_key_version' settings table): {exc}"
         ) from exc
     finally:
         cursor.close()
@@ -443,7 +375,7 @@ def step_then_still_valid_after_rotation(context, name):
     assert not hit, (
         f"Expected the historical signature for contract '{name}' to remain valid after "
         f"key rotation (old key material must stay usable for verification in the token/"
-        f"trust store per docs/anforderung.md Workstream A5), got findings suggesting "
+        f"trust store), got findings suggesting "
         f"invalidity ({hit}): {findings}"
     )
 
@@ -466,7 +398,7 @@ def step_then_different_key_versions(context, old_name, new_name):
         version = body.get("key_version") if isinstance(body, dict) else None
         assert version is not None, (
             f"Expected the signature evidence for contract '{name}' to name the HSM key "
-            f"label/version used (AC12 requires old and new signatures to be "
+            f"label/version used (old and new signatures must be "
             f"distinguishable by key label/version) - no such field found in: {body}"
         )
         versions[name] = version

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log"
 	"time"
@@ -45,13 +46,24 @@ func (a JWTAuthenticator) JWTAuth(ctx context.Context, token string, scheme *sec
 	ip := middleware.IPFromContext(ctx)
 
 	if token == "" {
-		a.logAttempt(ctx, ip, nil, false)
+		a.logAttempt(ctx, ip, nil, nil, false)
 		return ctx, goa.PermanentError("unauthorized", "missing JWT token")
+	}
+
+	// System caller: the background PDF regenerator runs on NATS events with no
+	// user JWT, yet must reach the internal PKCS#11 signing primitives
+	// (DCS-IR-HI-01). It presents the in-cluster service credential, granted
+	// exactly this endpoint's required scopes. The token is a secret only ever
+	// forwarded in-cluster (subscriber -> pdf-core -> backend), never externally.
+	if sys := conf.SystemToken(); sys != "" && token == sys {
+		ctx = middleware.InjectAuthContext(ctx, scheme.RequiredScopes, "system", "system")
+		ctx = middleware.InjectBearerToken(ctx, token)
+		return ctx, nil
 	}
 
 	info, err := a.Validator.ValidateToken(ctx, token)
 	if err != nil {
-		a.logAttempt(ctx, ip, nil, false)
+		a.logAttempt(ctx, ip, nil, nil, false)
 		if err := a.checkAndLock(ctx, ip); err != nil {
 			return ctx, err
 		}
@@ -60,15 +72,19 @@ func (a JWTAuthenticator) JWTAuth(ctx context.Context, token string, scheme *sec
 
 	if len(scheme.RequiredScopes) > 0 {
 		if !hasAnyRole(info.Roles, scheme.RequiredScopes) {
-			a.logAttempt(ctx, ip, &info.HolderDID, false)
-			if err := a.checkAndLock(ctx, ip); err != nil {
-				return ctx, err
-			}
+			// A valid credential that lacks the required role is an
+			// authorization decision, not a failed authentication — it must
+			// NOT count toward the invalid-credential lockout (DCS-FR-UC-01-4),
+			// or a single user legitimately switching roles from one IP would
+			// lock themselves out. Recorded as an authenticated access event
+			// for the audit trail, not as a failed attempt.
+			a.logAttempt(ctx, ip, &info.HolderDID, info.Roles, true)
+			a.clearLock(ctx, ip)
 			return ctx, goa.PermanentError("forbidden", "insufficient permissions: requires one of %v", scheme.RequiredScopes)
 		}
 	}
 
-	a.logAttempt(ctx, ip, &info.HolderDID, true)
+	a.logAttempt(ctx, ip, &info.HolderDID, info.Roles, true)
 	a.clearLock(ctx, ip)
 
 	ctx = middleware.InjectAuthContext(ctx, info.Roles, info.HolderDID, info.ParticipantDID)
@@ -92,7 +108,7 @@ func hasAnyRole(roles []string, required []string) bool {
 
 // logAttempt writes a login attempt – errors are ignored so that a DB issue
 // does not block the login flow.
-func (a JWTAuthenticator) logAttempt(ctx context.Context, ip string, attemptBy *string, success bool) {
+func (a JWTAuthenticator) logAttempt(ctx context.Context, ip string, attemptBy *string, roles []string, success bool) {
 
 	tx, err := a.DB.BeginTxx(ctx, nil)
 	if err != nil {
@@ -104,6 +120,8 @@ func (a JWTAuthenticator) logAttempt(ctx context.Context, ip string, attemptBy *
 		}
 	}(tx)
 
+	metadata := accessMetadataFromContext(ctx)
+	roleBytes, _ := json.Marshal(roles)
 	_ = a.AAttemptRepo.Create(ctx, tx, db.AccessAttempt{
 		IPAddress:   ip,
 		AttemptBy:   attemptBy,
@@ -111,6 +129,7 @@ func (a JWTAuthenticator) logAttempt(ctx context.Context, ip string, attemptBy *
 		Success:     success,
 		Service:     ctx.Value(goa.ServiceKey).(string),
 		Method:      ctx.Value(goa.MethodKey).(string),
+		Roles:       string(roleBytes), Scope: metadata.Scope, DID: metadata.DID, Justification: metadata.Justification,
 	})
 
 	_ = tx.Commit()

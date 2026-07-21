@@ -1,25 +1,26 @@
 <script setup lang="ts">
+import { storeToRefs } from 'pinia'
+import { computed, onMounted, onUnmounted, type Ref, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import ContractManagerActions from '@/components/contract/ContractManagerActions.vue'
-import ContractStructureTree from '@/modules/contract-workflow-engine/components/ContractStructureTree.vue'
-import type { Contract } from '@/models/contract/contract'
+import { useDocumentExport } from '@/composables/useDocumentExport'
 import AuditView from '@/modules/contract-workflow-engine/components/AuditView.vue'
 import ContractDetailsEditor from '@/modules/contract-workflow-engine/components/ContractDetailsEditor.vue'
+import ContractStructureTree from '@/modules/contract-workflow-engine/components/ContractStructureTree.vue'
 import { useContractDataPreprocess } from '@/modules/contract-workflow-engine/composables/useContractDataPreprocess'
-import type { VerificationResult } from '@/modules/contract-workflow-engine/composables/useSemanticValueVerification'
 import { useContractContentValuesStore } from '@/modules/contract-workflow-engine/store/contractContentValuesStore'
 import { useContractEditorUiStore } from '@/modules/contract-workflow-engine/store/contractEditorUiStore'
 import TemplatePreview from '@/modules/template-repository/components/builder-editor/preview/TemplatePreview.vue'
 import { useDcsDraftStore } from '@/modules/template-repository/store/dcsDraftStore'
 import { useTemplateEditorUiStore } from '@/modules/template-repository/store/templateEditorUiStore'
+import { ROUTES } from '@/router/router'
 import { contractWorkflowService } from '@/services/contract-workflow-service'
 import { useAuthStore } from '@/stores/auth-store'
 import { useContractsStore } from '@/stores/contracts-store'
-import { ROUTES } from '@/router/router'
 import { ContractState } from '@/types/contract-state'
+import type { Contract } from '@/models/contract/contract'
+import type { VerificationResult } from '@/modules/contract-workflow-engine/composables/useSemanticValueVerification'
 import type { UserRole } from '@/types/user-role'
-import { storeToRefs } from 'pinia'
-import { computed, onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
-import { useRoute } from 'vue-router'
 
 const route = useRoute()
 
@@ -116,11 +117,11 @@ function applyContractDataToDraft(contractData?: unknown) {
   if (cd) {
     dcsDraftStore.reset({
       workflow: 'contract',
+      documentIri: ((contractData as Record<string, unknown>)['@id'] as string | undefined) ?? null,
       blocks: cd.blocks,
       layout: cd.layout,
       contractData: cd.contractData,
       policies: cd.policies,
-      subTemplateSnapshots: cd.subTemplateSnapshots,
     })
     contractContentValuesStore.reset({ semanticConditionValues: cd.semanticConditionValues ?? [] })
   } else {
@@ -130,18 +131,21 @@ function applyContractDataToDraft(contractData?: unknown) {
   verificationResult.value = null
 }
 
-const exportPDF = async () => {
-  if (contract?.value?.did === null || contract?.value?.did === undefined) {
-    return
-  }
+const { download: downloadExport, exporting } = useDocumentExport()
 
-  const blob = await contractWorkflowService.exportPdf(contract?.value?.did)
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `contract-${contract?.value?.did}.pdf`
-  a.click()
-  URL.revokeObjectURL(url)
+const exportPDF = async () => {
+  const did = contract?.value?.did
+  if (!did) return
+  await downloadExport(() => contractWorkflowService.exportPdf(did), `contract-${did}.pdf`)
+}
+
+// The zip bundle of this contract's locally-known hierarchy
+// (DCS-FR-CWE-30): the contract, its ancestors, and every descendant this
+// instance holds, each as JSON-LD + provenanced PDF plus a manifest.
+const exportBundle = async () => {
+  const did = contract?.value?.did
+  if (!did) return
+  await downloadExport(() => contractWorkflowService.exportBundle(did), `contract-bundle-${did}.zip`)
 }
 </script>
 
@@ -237,7 +241,6 @@ const exportPDF = async () => {
                         :semantic-conditions="dcsDraftStore.semanticConditions"
                         :semantic-condition-values="contractContentValuesStore.semanticConditionValues"
                         :verification-result="verificationResult"
-                        :sub-template-snapshots="dcsDraftStore.subTemplateSnapshots"
                       />
                     </div>
                   </div>
@@ -311,7 +314,13 @@ const exportPDF = async () => {
     <div class="sticky bottom-0 shrink-0 border-t border-base-300 bg-base-100">
       <div class="mx-auto flex max-w-4xl flex-col gap-3 px-6 py-3 md:flex-row">
         <button class="btn btn-outline md:w-32" @click="$router.back()">Back</button>
-        <button class="btn btn-outline md:w-32" @click="exportPDF">Export PDF</button>
+        <!-- Both exports need the loaded contract's DID; until it arrives the
+             handlers can only return silently, so the click looks like it did
+             nothing. Disable them while the contract is still loading. -->
+        <button class="btn btn-outline md:w-32" :disabled="exporting || !contract" @click="exportPDF">Export PDF</button>
+        <button class="btn btn-outline md:w-36" :disabled="exporting || !contract" @click="exportBundle">
+          Export bundle
+        </button>
         <ContractManagerActions v-if="contract" :contract="contract" class="btn flex-1 btn-primary" />
       </div>
     </div>

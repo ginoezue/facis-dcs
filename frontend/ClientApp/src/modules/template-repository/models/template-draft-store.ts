@@ -1,49 +1,27 @@
-import type { ContractTemplateState } from '@/types/contract-template-state'
-import type { SubTemplateSnapshot } from '@/models/contract-template'
-import type {
-  PlaceholderBinding,
-  PolicyBundle,
-  SemanticRule,
-  SLAAgreement,
-  TemplateVariable,
-} from '@/models/semantic/facis-dcs-semantic'
-import type {
-  MetaData,
-  TemplateTypeValue,
-  PolicyReference,
-  SchemaReferenceSet,
-  ValidationProfile,
-} from '@/modules/template-repository/models/contract-template'
 import type { ContractTemplateResponsible } from '@/models/contract-template-responsible'
-import type { DcsBlock, DcsLayoutNode, DcsDataRequirement, OdrlRule } from '@/models/dcs-jsonld'
-import type { MergedApprovedTemplateBlock } from '@template-repository/store/dcsDraftStore'
+import type { DcsBlock, DcsLayoutNode, DcsPlaceholder, OdrlRule } from '@/models/dcs-jsonld'
+import type { MetaData, TemplateTypeValue } from '@/modules/template-repository/models/contract-template'
+import type { ContractTemplateState } from '@/types/contract-template-state'
 
 export const TEMPLATE_DATA_VERSIONS = [1] as const
 export type TemplateDataVersion = (typeof TEMPLATE_DATA_VERSIONS)[number]
 
 interface TemplateDraftState {
   did: string | null
+  /** The document's @id — its dereferenceable resource IRI; authored fragments anchor to it. */
+  documentIri: string | null
   name: string
   description: string
   templateDataVersion: TemplateDataVersion
-  /** JSON-LD blocks (canonical + virtual merged blocks for frame-contract editing). */
-  blocks: (DcsBlock | MergedApprovedTemplateBlock)[]
+  /** JSON-LD blocks (self-contained sections/clauses/text). */
+  blocks: DcsBlock[]
   /** JSON-LD layout tree. */
   layout: DcsLayoutNode[]
   /** JSON-LD data requirements (replaces semanticConditions as stored state). */
-  contractData: DcsDataRequirement[]
+  contractData: DcsPlaceholder[]
   /** JSON-LD ODRL policies (operator constraints). */
   policies: OdrlRule[]
   customMetaData: MetaData[]
-  schemaRefs: SchemaReferenceSet
-  policyRefs: PolicyReference[]
-  validation: ValidationProfile
-  templateVariables: TemplateVariable[]
-  placeholderBindings: PlaceholderBinding[]
-  semanticRules: SemanticRule[]
-  policyBundle: PolicyBundle | null
-  sla: SLAAgreement | null
-  subTemplateSnapshots: SubTemplateSnapshot[]
   templateType: TemplateTypeValue
   state: ContractTemplateState | undefined
   document_number: string | null
@@ -55,7 +33,7 @@ interface TemplateDraftState {
 }
 
 /** Block types in JSON-LD @type notation. */
-export type NewBlockType = 'dcs:Section' | 'dcs:TextBlock' | 'dcs:Clause' | 'dcs:ApprovedTemplate'
+export type NewBlockType = 'dcs:Section' | 'dcs:TextBlock' | 'dcs:Clause'
 
 /** Payload for adding a new block. */
 export interface AddBlockPayload {
@@ -65,20 +43,10 @@ export interface AddBlockPayload {
   // #### For Clause ####
   clauseBlockId?: string
   content?: import('@/models/dcs-jsonld').DcsContentSegment[]
-  blockCatalogueId?: string
-  schemaRef?: string
-  semanticPath?: string
-  // #### For ApprovedTemplate ####
-  templateId?: string
-  version?: number
-  document_number?: string
-  merged_approved_block_id?: string
 }
 
 export interface AddBlockOptions {
   addToOutline?: boolean
 }
-
-export type SubTemplateReference = Pick<SubTemplateSnapshot, 'did' | 'version' | 'document_number'>
 
 export type { TemplateDraftState }

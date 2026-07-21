@@ -28,8 +28,6 @@ import (
 
 	db2 "digital-contracting-service/internal/dcstodcs/db"
 
-	"digital-contracting-service/internal/contractworkflowengine/remotesync/remoteaction"
-
 	"github.com/jmoiron/sqlx"
 
 	"digital-contracting-service/internal/base/datatype/componenttype"
@@ -74,32 +72,6 @@ func (h *NegotiationAcceptor) Handle(ctx context.Context, cmd AcceptNegotiationC
 		return fmt.Errorf("could not process core data: %w", err)
 	}
 
-	localPeer, err := h.DIDDocument.GetID()
-	if err != nil {
-		return err
-	}
-
-	if processData.Origin != localPeer && cmd.CauserDID != processData.Origin {
-		/*
-			Not the Origin peer for this contract: forward unchanged to the peer
-			that is (single-writer-per-aggregate, see package doc / ADR-0005).
-			Note this command carries no UpdatedAt, so it skips the optimistic-
-			concurrency check that most other handlers in this package apply.
-		*/
-
-		err := tx.Commit()
-		if err != nil {
-			return fmt.Errorf("could not commit transaction: %w", err)
-		}
-
-		err = remoteaction.AcceptNegotiation.Execute(ctx, h.DB, h.DIDDocument, processData.Origin, processData.DID, cmd)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}
-
 	if err := contractstate.ValidateTransition(contractstate.ContractState(processData.State), contractstate.EventAcceptNegotiation); err != nil {
 		return err
 	}
@@ -110,7 +82,21 @@ func (h *NegotiationAcceptor) Handle(ctx context.Context, cmd AcceptNegotiationC
 	}
 
 	if !isValidNegotiator {
-		return errors.New("invalid user")
+		return ErrNotAParty
+	}
+
+	// Conflict-of-interest guard (FR-CWE-07): the identity that authored this
+	// negotiation's change_request may not be the same identity now accepting
+	// it. created_by/AcceptedBy are both the caller's participant identity
+	// (middleware.GetParticipantID — the organization claim from the OID4VP
+	// credential, see internal/middleware/oidc.go), independent of the
+	// peer-DID-scoped CauserDID checked above.
+	createdBy, err := h.NRepo.ReadCreatedByByNegotiationID(ctx, tx, cmd.ID)
+	if err != nil {
+		return fmt.Errorf("could not read negotiation author: %w", err)
+	}
+	if createdBy != "" && createdBy == cmd.AcceptedBy {
+		return ErrConflictOfInterest
 	}
 
 	err = h.NRepo.Accept(ctx, tx, cmd.ID, cmd.CauserDID)

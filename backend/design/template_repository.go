@@ -216,6 +216,27 @@ var ContractTemplateRetrieveResponse = Type("ContractTemplateRetrieveResponse", 
 	Required("contract_templates", "review_tasks", "approval_tasks")
 })
 
+var TemplateProvenanceRetrieveRequest = Type("TemplateProvenanceRetrieveRequest", func() {
+	Description("Template provenance credentials retrieve request")
+
+	Token("token", String, "JWT token")
+
+	Attribute("did", String, "DID of the contract template")
+
+	Required("did")
+})
+
+var TemplateProvenanceCredentialResponse = Type("TemplateProvenanceCredentialResponse", func() {
+	Description("One registered template version's signed W3C provenance credential (DCS-FR-TR-09), linked to its predecessor")
+
+	Attribute("version", Int, "Template version the credential seals")
+	Attribute("vc_id", String, "Credential ID (urn:dcs:vc:template-provenance:<hash>)")
+	Attribute("previous_vc_id", String, "Credential ID of the previous version's credential; absent for the first version")
+	Attribute("credential", Any, "The signed W3C Verifiable Credential (JSON-LD, ecdsa-rdfc-2019 Data Integrity proof)")
+
+	Required("version", "vc_id", "credential")
+})
+
 var ContractTemplateHistoryRetrieveByIDRequest = Type("ContractTemplateHistoryRetrieveByIDRequest", func() {
 	Description("Contract template retrieve by id request")
 
@@ -639,6 +660,35 @@ var _ = Service("TemplateRepository", func() {
 		})
 	})
 
+	// GET /template/provenance/{did}
+	Method("provenance", func() {
+		Description("DCS-FR-TR-09 Template Provenance and Versioning: the per-version signed W3C provenance credentials (creator/reviewer/approver/registrar claims, content hash, previous-credential linkage) a template user verifies a template's provenance with.")
+		Meta("dcs:requirements", "DCS-FR-TR-09")
+		Meta("dcs:tr:components", "Template Versioning")
+
+		Security(JWTAuth, func() {
+			Scope("Template Creator")
+			Scope("Template Reviewer")
+			Scope("Template Approver")
+			Scope("Template Manager")
+		})
+
+		Payload(TemplateProvenanceRetrieveRequest)
+		Result(ArrayOfRequired(TemplateProvenanceCredentialResponse))
+
+		Error("bad_request", ErrorResult, "Bad request")
+		Error("internal_error", ErrorResult, "Internal server error")
+
+		HTTP(func() {
+			GET("/template/provenance/{did}")
+			Param("did")
+
+			Response(StatusOK)
+			Response("bad_request", StatusBadRequest)
+			Response("internal_error", StatusInternalServerError)
+		})
+	})
+
 	// GET /template/history/{did}
 	Method("retrieve_history_by_id", func() {
 		Description("fetch history of a contract template")
@@ -659,6 +709,34 @@ var _ = Service("TemplateRepository", func() {
 
 		HTTP(func() {
 			GET("/template/history/{did}")
+			Param("did")
+
+			Response(StatusOK)
+			Response("bad_request", StatusBadRequest)
+			Response("internal_error", StatusInternalServerError)
+		})
+	})
+
+	// GET /template/{did} — the template's resource IRI
+	Method("resolve", func() {
+		Description("Dereference a template's resource IRI ({DCS_PUBLIC_URL}/template/{did}): serves the canonical JSON-LD template document under the same authorization as retrieve_by_id. This route is what makes a template's @id follow-your-nose resolvable.")
+		Meta("dcs:requirements", "DCS-FR-TR-01")
+
+		Security(JWTAuth, func() {
+			Scope("Template Creator")
+			Scope("Template Reviewer")
+			Scope("Template Approver")
+			Scope("Template Manager")
+		})
+
+		Payload(ContractTemplateRetrieveByIDRequest)
+		Result(Any)
+
+		Error("bad_request", ErrorResult, "Bad request")
+		Error("internal_error", ErrorResult, "Internal server error")
+
+		HTTP(func() {
+			GET("/template/{did}")
 			Param("did")
 
 			Response(StatusOK)

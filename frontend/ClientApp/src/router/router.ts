@@ -1,31 +1,7 @@
-import { getUIBasePath } from '@/config'
-import { useScrollStore } from '@/core/store/scroll'
-import ApproveContractTemplateView from '@/modules/template-repository/views/ApproveContractTemplateView.vue'
-import ReviewContractTemplateView from '@/modules/template-repository/views/ReviewContractTemplateView.vue'
-import ViewContractTemplateView from '@/modules/template-repository/views/ViewContractTemplateView.vue'
-import { OID4VP_STATE_KEY } from '@/hydra-login-guard'
-import { authenticationService } from '@/services/authentication-service'
-import { useAuthStore } from '@/stores/auth-store'
-import { useAuthTokenStore } from '@/stores/auth-token-store'
-import { useNavStore } from '@/stores/nav-store'
-import AuditView from '@/views/audit/AuditView.vue'
-import AuthSuccessView from '@/views/auth/AuthSuccessView.vue'
-import SigningDashboardView from '@/views/signing/SigningDashboardView.vue'
-import LoginView from '@/views/auth/LoginView.vue'
-import PidPresentationView from '@/views/auth/PidPresentationView.vue'
-import ContractTemplateListView from '@/views/contract-template-list/ContractTemplateListView.vue'
-import ApproveContractView from '@/views/contract/ApproveContractView.vue'
-import ContractListView from '@/views/contract/ContractListView.vue'
-import NegotiateContractView from '@/views/contract/NegotiateContractView.vue'
-import NewContractView from '@/views/contract/NewContractView.vue'
-import ReviewContractView from '@/views/contract/ReviewContractView.vue'
-import ViewContractView from '@/views/contract/ViewContractView.vue'
-import TaskListView from '@/views/task/TaskListView.vue'
-import TemplateCatalogueListView from '@/modules/template-catalogue/views/TemplateCatalogueListView.vue'
-import TemplateCatalogueView from '@/modules/template-catalogue/views/TemplateCatalogueView.vue'
 import {
   ArrowsRightLeftIcon,
   CheckCircleIcon,
+  CircleStackIcon,
   ClipboardDocumentListIcon,
   DocumentTextIcon,
   EyeIcon,
@@ -34,7 +10,35 @@ import {
 } from '@heroicons/vue/20/solid'
 import NewContractTemplateView from '@template-repository/views/NewContractTemplateView.vue'
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+import { getUIBasePath } from '@/config'
+import { useScrollStore } from '@/core/store/scroll'
+import { OID4VP_STATE_KEY } from '@/hydra-login-guard'
+import SemanticHubView from '@/modules/semantic-hub/views/SemanticHubView.vue'
+import TemplateCatalogueListView from '@/modules/template-catalogue/views/TemplateCatalogueListView.vue'
+import TemplateCatalogueView from '@/modules/template-catalogue/views/TemplateCatalogueView.vue'
+import ApproveContractTemplateView from '@/modules/template-repository/views/ApproveContractTemplateView.vue'
+import ReviewContractTemplateView from '@/modules/template-repository/views/ReviewContractTemplateView.vue'
+import ViewContractTemplateView from '@/modules/template-repository/views/ViewContractTemplateView.vue'
+import { authenticationService } from '@/services/authentication-service'
+import { useAuthStore } from '@/stores/auth-store'
+import { useAuthTokenStore } from '@/stores/auth-token-store'
+import { useNavStore } from '@/stores/nav-store'
+import AuditView from '@/views/audit/AuditView.vue'
+import AuthSuccessView from '@/views/auth/AuthSuccessView.vue'
+import LoginView from '@/views/auth/LoginView.vue'
+import PidPresentationView from '@/views/auth/PidPresentationView.vue'
+import ComplianceViewerView from '@/views/compliance/ComplianceViewerView.vue'
+import ApproveContractView from '@/views/contract/ApproveContractView.vue'
+import ContractListView from '@/views/contract/ContractListView.vue'
+import NegotiateContractView from '@/views/contract/NegotiateContractView.vue'
+import NewContractView from '@/views/contract/NewContractView.vue'
+import ReviewContractView from '@/views/contract/ReviewContractView.vue'
+import ViewContractView from '@/views/contract/ViewContractView.vue'
+import ContractTemplateListView from '@/views/contract-template-list/ContractTemplateListView.vue'
 import FrontPageView from '@/views/FrontPageView.vue'
+import SecureContractViewerView from '@/views/signing/SecureContractViewerView.vue'
+import SigningListView from '@/views/signing/SigningListView.vue'
+import TaskListView from '@/views/task/TaskListView.vue'
 
 const ROUTES = {
   HOME: 'home',
@@ -73,7 +77,14 @@ const ROUTES = {
     APPROVE: 'contracts.approve',
   },
   SIGNING: {
-    DASHBOARD: 'signing.dashboard',
+    LIST: 'signing.list',
+    VIEWER: 'signing.viewer',
+  },
+  COMPLIANCE: {
+    VIEWER: 'compliance.viewer',
+  },
+  SEMANTIC_HUB: {
+    DASHBOARD: 'semantic_hub.dashboard',
   },
 } as const
 
@@ -244,7 +255,7 @@ const routes: RouteRecordRaw[] = [
       requiresAuth: true,
       title: 'DCS - Audit',
       order: 5,
-      roles: ['AUDITOR'],
+      roles: ['AUDITOR', 'ARCHIVE_MANAGER'],
     },
   },
   {
@@ -369,15 +380,53 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/signing',
-    name: ROUTES.SIGNING.DASHBOARD,
-    component: SigningDashboardView,
+    name: ROUTES.SIGNING.LIST,
+    component: SigningListView,
     meta: {
-      name: 'Signing Dashboard',
+      name: 'Signing',
       icon: PencilSquareIcon,
       requiresAuth: true,
-      title: 'DCS - Signing Dashboard',
+      title: 'DCS - Signing',
       order: 5,
       roles: ['CONTRACT_SIGNER', 'CONTRACT_MANAGER', 'CONTRACT_OBSERVER'],
+    },
+  },
+  {
+    path: '/signing/:did',
+    name: ROUTES.SIGNING.VIEWER,
+    component: SecureContractViewerView,
+    meta: {
+      name: 'Secure Contract Viewer',
+      hideInSidebar: true,
+      requiresAuth: true,
+      title: 'DCS - Secure Contract Viewer',
+      roles: ['CONTRACT_SIGNER', 'CONTRACT_MANAGER'],
+    },
+  },
+  {
+    path: '/compliance',
+    name: ROUTES.COMPLIANCE.VIEWER,
+    component: ComplianceViewerView,
+    meta: {
+      name: 'Compliance Viewer',
+      icon: CheckCircleIcon,
+      requiresAuth: true,
+      title: 'DCS - Signature Compliance Viewer',
+      order: 6,
+      roles: ['AUDITOR', 'COMPLIANCE_OFFICER', 'CONTRACT_MANAGER'],
+    },
+  },
+  {
+    path: '/semantic-hub',
+    name: ROUTES.SEMANTIC_HUB.DASHBOARD,
+    component: SemanticHubView,
+    meta: {
+      name: 'Semantic Hub',
+      icon: CircleStackIcon,
+      requiresAuth: true,
+      title: 'DCS - Semantic Hub',
+      order: 6,
+      roles: ['TEMPLATE_MANAGER'],
     },
   },
   {
@@ -422,6 +471,14 @@ router.beforeEach(async (to) => {
   }
 
   if (authStore.isAuthenticated) {
+    return true
+  }
+
+  // A valid stored token already carries the identity — restore it without a
+  // refresh round-trip; only refresh when there is no usable token (its
+  // rotating refresh cookie is single-use, so it must not be spent on every
+  // navigation).
+  if (authStore.restoreFromToken()) {
     return true
   }
 

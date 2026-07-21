@@ -15,20 +15,29 @@ import (
 	cloudevent "github.com/cloudevents/sdk-go/v2/event"
 	"github.com/jmoiron/sqlx"
 
+	"digital-contracting-service/internal/base/conf"
+	"digital-contracting-service/internal/base/datatype/componenttype"
 	"digital-contracting-service/internal/base/event"
 	"digital-contracting-service/internal/base/ipfs"
 	cweeventtype "digital-contracting-service/internal/contractworkflowengine/datatype/eventtype"
 	cwedb "digital-contracting-service/internal/contractworkflowengine/db"
+	cweevent "digital-contracting-service/internal/contractworkflowengine/event"
+	"digital-contracting-service/internal/middleware"
 	"digital-contracting-service/internal/pdfgeneration/pdfcore"
 	"digital-contracting-service/internal/pdfgeneration/provenance"
 	tplevttype "digital-contracting-service/internal/templaterepository/datatype/eventtype"
 	tpldb "digital-contracting-service/internal/templaterepository/db"
 )
 
-// contractLifecycleEventTypes is the set of CWE event types that represent a
-// contract state change and therefore require a new C2PA assertion.
+// contractLifecycleEventTypes is the set of CWE event types that change a
+// contract's rendered content or lifecycle state and therefore require the PDF
+// to be regenerated in the background — including Update (a content edit), so
+// the exported PDF is never generated on demand.
 var contractLifecycleEventTypes = map[string]bool{
 	cweeventtype.Create.String():                  true,
+	cweeventtype.Update.String():                  true,
+	cweeventtype.Offer.String():                   true,
+	cweeventtype.Withdraw.String():                true,
 	cweeventtype.Submit.String():                  true,
 	cweeventtype.Approve.String():                 true,
 	cweeventtype.Reject.String():                  true,
@@ -39,9 +48,11 @@ var contractLifecycleEventTypes = map[string]bool{
 }
 
 // templateLifecycleEventTypes is the set of template repository event types
-// that represent a state change and require a new C2PA assertion.
+// that change a template's content or state and require background PDF
+// regeneration — including Update (a content edit).
 var templateLifecycleEventTypes = map[string]bool{
 	tplevttype.Create.String():   true,
+	tplevttype.Update.String():   true,
 	tplevttype.Submit.String():   true,
 	tplevttype.Approve.String():  true,
 	tplevttype.Reject.String():   true,
@@ -67,6 +78,11 @@ type Subscriber struct {
 	TRepo      tpldb.ContractTemplateRepo
 	PDFCore    *pdfcore.Client
 	IssuerDID  string
+	// LocalPeer is this instance's own did:web. A contract whose Origin is not
+	// this DID was received from a peer (ADR-13); its stored PDF carries the
+	// counterparty's C2PA chain, so a content change must amend that base rather
+	// than fresh-render (which would strip the counterparty's provenance).
+	LocalPeer string
 	// VCIssuer issues and signs a W3C VC for each lifecycle event (DCS-OR-C2PA-004/005).
 	VCIssuer provenance.VCIssuer
 }
@@ -77,6 +93,9 @@ type Subscriber struct {
 func (s *Subscriber) Start(subClient *event.CloudEventSubClient) error {
 	return subClient.Subscribe(func(evt cloudevent.Event) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		// The regenerator has no user JWT; present the in-cluster system
+		// credential so pdf-core can reach the internal signing primitives.
+		ctx = middleware.InjectBearerToken(ctx, conf.SystemToken())
 		defer cancel()
 		if err := s.handle(ctx, evt); err != nil {
 			log.Printf("pdfgeneration: failed to handle event %s/%s: %v", evt.Source(), evt.Type(), err)
@@ -91,16 +110,11 @@ func (s *Subscriber) handle(ctx context.Context, evt cloudevent.Event) error {
 		return nil
 	}
 
-	// The outbox processor publishes the event as json.Marshal([]byte) which
-	// JSON-encodes the payload bytes as a base64 string. DataAs(&[]byte) reverses
-	// this automatically.
-	var rawPayload []byte
-	if err := evt.DataAs(&rawPayload); err != nil {
-		return fmt.Errorf("decode event payload: %w", err)
-	}
-
+	// The outbox publisher passes the domain event straight through as
+	// json.RawMessage (cloudeventprovider.go: marshalling a RawMessage is the
+	// identity), so the CloudEvent data IS the domain event object.
 	var cweEvt minimalCWEEvent
-	if err := json.Unmarshal(rawPayload, &cweEvt); err != nil {
+	if err := json.Unmarshal(evt.Data(), &cweEvt); err != nil {
 		return fmt.Errorf("unmarshal CWE event: %w", err)
 	}
 	if cweEvt.DID == "" {
@@ -124,6 +138,14 @@ func (s *Subscriber) appendC2PA(ctx context.Context, cweEvt minimalCWEEvent) err
 		}
 	}(tx)
 
+	// Serialize regeneration per contract IRI: concurrent lifecycle events for
+	// the same contract queue on this lock instead of racing the read-modify-
+	// write of the PDF state (which would double-render and could fork the C2PA
+	// chain). Released on tx commit/rollback.
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", cweEvt.DID); err != nil {
+		return fmt.Errorf("acquire per-contract PDF regeneration lock for %s: %w", cweEvt.DID, err)
+	}
+
 	// Fetch current contract state and JSON-LD.
 	contract, err := s.CRepo.ReadDataByDID(ctx, tx, cweEvt.DID)
 	if err != nil {
@@ -137,47 +159,73 @@ func (s *Subscriber) appendC2PA(ctx context.Context, cweEvt minimalCWEEvent) err
 	payloadHashSum := sha256.Sum256(jsonldBytes)
 	currentPayloadHash := hex.EncodeToString(payloadHashSum[:])
 
-	state := cweEvt.NewState
-	effectiveAt := cweEvt.OccurredAt
-
-	// Map the raw CWE state to the SRS-defined C2PA vocabulary (DCS-OR-C2PA-003).
-	c2paState, err := provenance.MapCWEStateToC2PA(state)
+	// Map the contract's committed state to the SRS-defined C2PA vocabulary
+	// (DCS-OR-C2PA-003). The record's state is the source of truth: the genesis
+	// CreateEvent carries no new_state, and the event is emitted only after the
+	// transition commits, so the record always reflects the state the PDF must
+	// assert.
+	c2paState, err := provenance.MapCWEStateToC2PA(contract.State)
 	if err != nil {
-		return fmt.Errorf("map contract state %q to C2PA state: %w", state, err)
+		return fmt.Errorf("map contract state %q to C2PA state: %w", contract.State, err)
 	}
 
-	// Fetch the base PDF and check for idempotency.
 	pdfState, err := s.CRepo.ReadPDFState(ctx, tx, cweEvt.DID)
 	if err != nil {
 		return fmt.Errorf("read PDF state for contract %s: %w", cweEvt.DID, err)
 	}
 
-	if pdfState.C2PAState == c2paState {
-		// Already embedded by a concurrent export call — skip.
+	// A frozen PDF is a PAdES-signed artifact (DCS-FR-SM-16): the signing
+	// command already produced the final signed bytes and stored them, and any
+	// post-signing C2PA lifecycle update runs through the explicit signing/
+	// revoke endpoints — never this background regenerator. Re-rendering here
+	// would replace the signed PDF with an unsigned one and destroy the
+	// signature's /ByteRange, so leave a frozen artifact untouched.
+	if pdfState.IPFSCID != "" && provenance.IsFrozenC2PAState(pdfState.C2PAState) {
 		return nil
 	}
 
-	if pdfState.IPFSCID == "" {
-		return fmt.Errorf("no cached PDF for contract %s; export must be called before state-change events can chain", cweEvt.DID)
+	contentChanged := pdfState.PayloadHash != currentPayloadHash
+	stateChanged := pdfState.C2PAState != c2paState
+	if pdfState.IPFSCID != "" && !contentChanged && !stateChanged {
+		return nil // already up to date — idempotent re-delivery
 	}
-	ipfsResult, err := s.IPFSClient.FetchFile(pdfState.IPFSCID)
-	if err != nil || len(ipfsResult.Data) == 0 {
-		return fmt.Errorf("fetch PDF from IPFS %s for contract %s: %w", pdfState.IPFSCID, cweEvt.DID, err)
+
+	// The signature fields are seeded at genesis (create.go), so the initial
+	// render already carries the full signable AcroForm structure and no later
+	// render needs to introduce fields. Every regeneration therefore AMENDS the
+	// stored PDF (pdfCore.Update chains the prior manifest as an ingredient) —
+	// whether the change is a state transition, a local content edit, or a
+	// peer-received counter-offer — so the C2PA provenance chain and any embedded
+	// signatures always carry through and grow instead of resetting (ADR-13). The
+	// inbound peer PDF is the authoritative base: it holds provenance and
+	// credentials this instance cannot reproduce. A fresh render happens only at
+	// genesis, when there is no stored PDF yet.
+	var basePDF []byte
+	if pdfState.IPFSCID != "" {
+		ipfsResult, err := s.IPFSClient.FetchFile(pdfState.IPFSCID)
+		if err != nil || len(ipfsResult.Data) == 0 {
+			return fmt.Errorf("fetch PDF from IPFS %s for contract %s: %w", pdfState.IPFSCID, cweEvt.DID, err)
+		}
+		basePDF = ipfsResult.Data
+	} else {
+		basePDF, _, err = s.PDFCore.Download(ctx, jsonldBytes)
+		if err != nil {
+			return fmt.Errorf("pdf-core render for contract %s: %w", cweEvt.DID, err)
+		}
 	}
-	existingPDF := []byte(ipfsResult.Data)
 
 	// Compute asset hash for the VC credentialSubject (DCS-OR-C2PA-004).
-	h := sha256.Sum256(existingPDF)
+	h := sha256.Sum256(basePDF)
 	fileHash := hex.EncodeToString(h[:])
 
 	_, vcBytes, err := s.VCIssuer.IssueContractLifecycleVC(
-		ctx, cweEvt.DID, fileHash, c2paState, cweEvt.Reason, s.IssuerDID, effectiveAt,
+		ctx, cweEvt.DID, fileHash, c2paState, cweEvt.Reason, s.IssuerDID, cweEvt.OccurredAt,
 	)
 	if err != nil {
 		return fmt.Errorf("issue lifecycle VC (DCS-OR-C2PA-004): %w", err)
 	}
 
-	updatedPDF, rendererVersion, err := s.PDFCore.Update(ctx, existingPDF, jsonldBytes, vcBytes, provenance.RemoteManifestURL(cweEvt.DID))
+	updatedPDF, rendererVersion, err := s.PDFCore.Update(ctx, basePDF, jsonldBytes, vcBytes, provenance.RemoteManifestURL(cweEvt.DID))
 	if err != nil {
 		return fmt.Errorf("pdf-core update for contract %s: %w", cweEvt.DID, err)
 	}
@@ -197,11 +245,20 @@ func (s *Subscriber) appendC2PA(ctx context.Context, cweEvt minimalCWEEvent) err
 		return fmt.Errorf("update pdf_ipfs_cid for %s: %w", cweEvt.DID, err)
 	}
 
+	if err := event.Create(ctx, tx, cweevent.PdfRegeneratedEvent{
+		DID:        cweEvt.DID,
+		IPFSCID:    storeResult.Identifier.Value,
+		State:      string(contract.State),
+		OccurredAt: time.Now().UTC(),
+	}, componenttype.ContractWorkflowEngine); err != nil {
+		return fmt.Errorf("emit PDF-regenerated event for %s: %w", cweEvt.DID, err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit pdf_ipfs_cid update for %s: %w", cweEvt.DID, err)
 	}
 
-	log.Printf("pdfgeneration: updated PDF for contract %s (state=%s) → IPFS CID %s", cweEvt.DID, state, storeResult.Identifier.Value)
+	log.Printf("pdfgeneration: regenerated PDF for contract %s (state=%s, contentChanged=%t) → IPFS CID %s", cweEvt.DID, contract.State, contentChanged, storeResult.Identifier.Value)
 	return nil
 }
 
@@ -228,25 +285,31 @@ func (s *Subscriber) appendTemplateC2PA(ctx context.Context, tplEvt minimalCWEEv
 		jsonldBytes = []byte(*tpl.TemplateData)
 	}
 
-	state := tplEvt.NewState
-	effectiveAt := tplEvt.OccurredAt
-
-	c2paState, err := provenance.MapCWEStateToC2PA(state)
+	// The template record's state is the source of truth (the genesis CreateEvent
+	// carries no new_state); the event is emitted only after the transition commits.
+	c2paState, err := provenance.MapCWEStateToC2PA(tpl.State)
 	if err != nil {
-		return fmt.Errorf("map template state %q to C2PA state: %w", state, err)
+		return fmt.Errorf("map template state %q to C2PA state: %w", tpl.State, err)
 	}
+
+	payloadHashSum := sha256.Sum256(jsonldBytes)
+	currentPayloadHash := hex.EncodeToString(payloadHashSum[:])
 
 	tplPDFState, err := s.TRepo.ReadPDFState(ctx, tx, tplEvt.DID)
 	if err != nil {
 		return fmt.Errorf("read PDF state for template %s: %w", tplEvt.DID, err)
 	}
 
-	if tplPDFState.C2PAState == c2paState {
-		return nil // Already embedded — skip.
+	contentChanged := tplPDFState.PayloadHash != currentPayloadHash
+	stateChanged := tplPDFState.C2PAState != c2paState
+	if tplPDFState.IPFSCID != "" && !contentChanged && !stateChanged {
+		return nil // already up to date
 	}
 
+	// State transition appends to preserve the chain; genesis or a content edit
+	// renders fresh from the current content.
 	var pdfBytes []byte
-	if tplPDFState.IPFSCID != "" {
+	if tplPDFState.IPFSCID != "" && !contentChanged {
 		ipfsResult, err := s.IPFSClient.FetchFile(tplPDFState.IPFSCID)
 		if err != nil || len(ipfsResult.Data) == 0 {
 			return fmt.Errorf("fetch PDF from IPFS %s for template %s: %w", tplPDFState.IPFSCID, tplEvt.DID, err)
@@ -259,7 +322,7 @@ func (s *Subscriber) appendTemplateC2PA(ctx context.Context, tplEvt minimalCWEEv
 		}
 	}
 
-	pdfBytes, err = s.appendOneTemplateManifest(ctx, tx, tplEvt.DID, state, jsonldBytes, pdfBytes, effectiveAt)
+	pdfBytes, err = s.appendOneTemplateManifest(ctx, tx, tplEvt.DID, tpl.State, jsonldBytes, pdfBytes, tplEvt.OccurredAt)
 	if err != nil {
 		return fmt.Errorf("append C2PA manifest for template %s: %w", tplEvt.DID, err)
 	}
@@ -269,7 +332,7 @@ func (s *Subscriber) appendTemplateC2PA(ctx context.Context, tplEvt minimalCWEEv
 		return fmt.Errorf("commit C2PA update for template %s: %w", tplEvt.DID, err)
 	}
 
-	log.Printf("pdfgeneration: updated PDF for template %s (state=%s)", tplEvt.DID, state)
+	log.Printf("pdfgeneration: regenerated PDF for template %s (state=%s, contentChanged=%t)", tplEvt.DID, tpl.State, contentChanged)
 	return nil
 }
 

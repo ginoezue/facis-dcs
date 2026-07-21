@@ -59,13 +59,11 @@ func NewLifecycleAssertion(contractID, fileHash, status, reason, authority, vcID
 // MapCWEStateToC2PA maps a CWE contract state to the canonical C2PA lifecycle
 // vocabulary defined in DCS-OR-C2PA-003. Unsupported states return an error.
 //
-// The mapping below follows the C4 contract-state-machine-refactor
-// requirement exactly: OFFERED/NEGOTIATION/SUBMITTED/REVIEWED/APPROVED all
-// map to "draft" (pre-signing contract-formation states — there is no
-// executable/binding manifest yet), SIGNED/ACTIVE map to "active",
-// REVOKED maps to "suspended", TERMINATED/EXPIRED map 1:1. This is a
-// deliberate behavior change from the previous mapping (APPROVED used to
-// map to "active"); see docs/anforderung.md Workstream C4 item 6.
+// OFFERED/NEGOTIATION/SUBMITTED/REVIEWED/APPROVED all map to "draft"
+// (pre-signing contract-formation states — there is no executable/binding
+// manifest yet), SIGNED/ACTIVE map to "active", REVOKED maps to
+// "suspended", TERMINATED/EXPIRED map 1:1. APPROVED deliberately maps to
+// "draft", not "active": approval alone does not make a contract binding.
 //
 // REJECTED and WITHDRAWN are not specified by DCS-OR-C2PA-003. Both are
 // pre-signing terminal states reached before any manifest would be expected
@@ -108,4 +106,14 @@ func MapCWEStateToC2PA(cweState string) (string, error) {
 		}
 		return "", fmt.Errorf("unsupported lifecycle state %q (allowed: DRAFT,OFFERED,NEGOTIATION,SUBMITTED,REVIEWED,APPROVED,REJECTED,WITHDRAWN,SIGNED,ACTIVE,REVOKED,REGISTERED,TERMINATED,EXPIRED,SUSPENDED,REPLACED,draft,active,amended,suspended,terminated,expired,replaced)", cweState)
 	}
+}
+
+// IsFrozenC2PAState reports whether a cached PDF's C2PA state means the artifact
+// is immutable. Every pre-signing contract-formation state maps to "draft" (see
+// MapCWEStateToC2PA), so anything past "draft" is a PAdES-signed (or
+// post-signing) PDF whose /ByteRange a re-render would destroy. Such a PDF may
+// only be served as-is or extended by an explicit incremental C2PA update — the
+// export/verify read paths and the background regenerator all gate on this.
+func IsFrozenC2PAState(c2paState string) bool {
+	return c2paState != "" && c2paState != "draft"
 }

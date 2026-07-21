@@ -11,9 +11,9 @@ var ContractCreateRequest = Type("ContractCreateRequest", func() {
 
 	Attribute("template_did", String, "The did of the contract template, that is to use to create a new contract")
 
-	Attribute("reviewers", ArrayOf(String), "A list of reviewers for that contract")
-	Attribute("approvers", ArrayOf(String), "A list of approvers for that contract")
-	Attribute("negotiators", ArrayOf(String), "A list of negotiators for that contract")
+	Attribute("counterparty", String, "The single peer DCS (a did:web) this contract is offered to and negotiated with (ADR-13). Together with the origin it forms the two parties: the PDF ship target and the signature-field slots. Reviewer/approver/negotiator are internal RBAC roles, isolated per instance — never peer DIDs.")
+	Attribute("parties", ArrayOf(String), "Organizations authorized to read this contract (legal names, matched against the OID4VP organization claim; stored as dcs:parties). Read authorization only — the contract's ODRL rule parties are bound from workflow evidence: the originator at creation via originator_role, the counterparty when signing completes.")
+	Attribute("originator_role", String, "The contractual role the creating organization declares for itself (e.g. provider, customer); binds the origin DID to that role's party node in the contract's ODRL rules. The counterpart role stays open until the counterparty accepts by signing.")
 
 	Required("template_did")
 })
@@ -67,9 +67,6 @@ var ContractSubmitRequest = Type("ContractSubmitRequest", func() {
 	Attribute("forward_to", String, "Action flag: approval | reject")
 	Attribute("comments", ArrayOf(String), "Optional comments")
 	Attribute("contract_data", Any, "Optional updated contract data to persist atomically before submit validation")
-	Attribute("reviewers", ArrayOf(String), "Participants assigned to review the contract")
-	Attribute("approvers", ArrayOf(String), "Participants assigned to approve the contract")
-	Attribute("negotiators", ArrayOf(String), "Participants assigned to negotiate the contract")
 
 	Required("did", "updated_at")
 })
@@ -186,6 +183,8 @@ var ContractItem = Type("ContractItem", func() {
 	Attribute("template_is_deprecated", Boolean, "Whether the template is deprecated")
 	Attribute("parent_contract_did", String, "The DID of the parent contract, if this is a sub-contract")
 	Attribute("evidence", Any, "Archive evidence blob (only populated for archived contracts), including a deployment sub-object with correlation_id/payload_hash/receipt_hash/tsa_token/activated_at (DCS-FR-SM-10, DCS-FR-SM-12)")
+	Attribute("archive_summary", String, "Archive annotation summary (only populated for archived contracts; DCS-FR-CSA-11)")
+	Attribute("archive_tags", ArrayOf(String), "Archive annotation tags (only populated for archived contracts; DCS-FR-CSA-11)")
 
 	Required("did", "state", "created_by", "created_at", "updated_at", "contract_version", "template_did", "template_version")
 })
@@ -266,6 +265,7 @@ var ContractRetrieveByIDResponse = Type("ContractRetrieveByIDResponse", func() {
 	Attribute("did", String, "DID of the contract")
 	Attribute("contract_version", Int, "The version of the contract")
 	Attribute("state", String, "Current state of the contract")
+	Attribute("extrinsic_lifecycle", String, "Peer-facing negotiation lifecycle inferred from the intrinsic state (proposed/agreed/executed), ADR-13")
 	Attribute("name", String, "The name of the contract")
 	Attribute("description", String, "The description of the contract")
 
@@ -491,6 +491,32 @@ var ContractTerminateResponse = Type("ContractTerminateResponse", func() {
 	Required("did")
 })
 
+var ContractRenewRequest = Type("ContractRenewRequest", func() {
+	Description("Contract renew request: create a new linked contract instance from an existing one (DCS-FR-CWE-11/22, DCS-FR-CSA-15). The original contract is not mutated; the new instance starts in DRAFT carrying the original's template reference, metadata, and responsible parties, plus a dcs:renewsContract reference back to the original's DID and version.")
+
+	Token("token", String, "JWT token")
+
+	Attribute("did", String, "Decentralized Identifier of the contract to renew")
+	Attribute("updated_at", String, "The caller's view of the original contract's last update timestamp (optimistic concurrency guard)")
+
+	Attribute("new_start_date", String, "Optional start date for the new renewal term; defaults to the original's start date if omitted")
+	Attribute("new_exp_date", String, "Optional expiry date for the new renewal term; defaults to the original's expiry date if omitted")
+	Attribute("new_exp_policy", String, "Optional expiry policy for the new renewal term; defaults to the original's expiry policy if omitted")
+	Attribute("new_exp_notice_period", Int, "Optional notice period (in days) for the new renewal term; defaults to the original's notice period if omitted")
+
+	Required("did", "updated_at")
+})
+
+var ContractRenewResponse = Type("ContractRenewResponse", func() {
+	Description("Result for renewing a contract")
+
+	Attribute("did", String, "Decentralized Identifier of the newly created renewal contract")
+	Attribute("renews_did", String, "Decentralized Identifier of the original contract this renewal references")
+	Attribute("renews_contract_version", Int, "Contract version of the original contract at the time of renewal")
+
+	Required("did", "renews_did", "renews_contract_version")
+})
+
 var ContractAuditRequest = Type("ContractAuditRequest", func() {
 	Description("Contract audit request")
 
@@ -666,6 +692,10 @@ var _ = Service("ContractWorkflowEngine", func() {
 			Scope("Contract Negotiator")
 			Scope("Contract Reviewer")
 			Scope("Sys. Contract Reviewer")
+			// The counterparty drives its inbound contract as Contract Manager
+			// (SRS §4); per-contract authorization is the negotiator/party check in
+			// the command handler, not local RBAC.
+			Scope("Contract Manager")
 			Scope("Contract Approver")
 			Scope("Sys. Contract Approver")
 		})
@@ -746,6 +776,11 @@ var _ = Service("ContractWorkflowEngine", func() {
 			Scope("Contract Negotiator")
 			Scope("Contract Reviewer")
 			Scope("Sys. Contract Reviewer")
+			// The Responder negotiates an inbound offer through the role that
+			// manages its received contracts (SRS §4 Contract Negotiation &
+			// Review); per-contract authorization for an inbound offer is the
+			// counterparty gate in command/negotiate.go, not local RBAC.
+			Scope("Contract Manager")
 		})
 
 		Payload(ContractNegotiationRequest)
@@ -774,6 +809,10 @@ var _ = Service("ContractWorkflowEngine", func() {
 			Scope("Contract Negotiator")
 			Scope("Contract Reviewer")
 			Scope("Sys. Contract Reviewer")
+			// The counterparty drives its inbound contract as Contract Manager
+			// (SRS §4); per-contract authorization is the negotiator/party check in
+			// the command handler, not local RBAC.
+			Scope("Contract Manager")
 		})
 
 		Payload(ContractNegotiationRespondRequest)
@@ -856,6 +895,75 @@ var _ = Service("ContractWorkflowEngine", func() {
 		})
 	})
 
+	// GET /contract/kpis/{did}
+	Method("kpi_observations", func() {
+		Description("The KPI values reported for a deployed contract as a JSON-LD observation set: dcs:KPIObservation nodes anchored to the Semantic Hub context, machine-readable alongside the human-facing kpis field of retrieve (DCS-FR-CWE-09/-31).")
+		Meta("dcs:requirements", "DCS-FR-CWE-09", "DCS-FR-CWE-31")
+		Meta("dcs:ui", "Contract Management Dashboard")
+
+		Security(JWTAuth, func() {
+			Scope("Contract Creator")
+			Scope("Sys. Contract Creator")
+			Scope("Contract Negotiator")
+			Scope("Contract Reviewer")
+			Scope("Sys. Contract Reviewer")
+			Scope("Contract Approver")
+			Scope("Sys. Contract Approver")
+			Scope("Contract Manager")
+			Scope("Sys. Contract Manager")
+			Scope("Contract Observer")
+		})
+
+		Payload(ContractRetrieveByIDRequest)
+		Result(Any)
+
+		Error("bad_request", ErrorResult, "Bad request")
+		Error("internal_error", ErrorResult, "Internal server error")
+
+		HTTP(func() {
+			GET("/contract/kpis/{did}")
+			Response(StatusOK)
+			Response("bad_request", StatusBadRequest)
+			Response("internal_error", StatusInternalServerError)
+		})
+	})
+
+	// GET /contract/{did} — the contract's resource IRI
+	Method("resolve", func() {
+		Description("Dereference a contract's resource IRI ({DCS_PUBLIC_URL}/contract/{did}): serves the canonical JSON-LD contract document under the same party read authorization as retrieve_by_id. This route is what makes a contract's @id follow-your-nose resolvable.")
+		Meta("dcs:requirements", "DCS-FR-CWE-02")
+
+		Security(JWTAuth, func() {
+			Scope("Contract Creator")
+			Scope("Sys. Contract Creator")
+			Scope("Contract Negotiator")
+			Scope("Contract Reviewer")
+			Scope("Sys. Contract Reviewer")
+			Scope("Contract Approver")
+			Scope("Sys. Contract Approver")
+			Scope("Contract Manager")
+			Scope("Sys. Contract Manager")
+			Scope("Contract Observer")
+		})
+
+		Payload(ContractRetrieveByIDRequest)
+		Result(Any)
+
+		Error("bad_request", ErrorResult, "Bad request")
+		Error("forbidden", ErrorResult, "Caller is not an authorized party of this contract")
+		Error("internal_error", ErrorResult, "Internal server error")
+
+		HTTP(func() {
+			GET("/contract/{did}")
+			Param("did")
+
+			Response(StatusOK)
+			Response("bad_request", StatusBadRequest)
+			Response("forbidden", StatusForbidden)
+			Response("internal_error", StatusInternalServerError)
+		})
+	})
+
 	// GET /contract/retrieve/{did}
 	Method("retrieve_by_id", func() {
 		Description("fetch submitted contract. fetch reviewed contract. fetch contract(s).")
@@ -881,6 +989,7 @@ var _ = Service("ContractWorkflowEngine", func() {
 		Result(ContractRetrieveByIDResponse)
 
 		Error("bad_request", ErrorResult, "Bad request")
+		Error("forbidden", ErrorResult, "Caller is not an authorized party of this contract")
 		Error("internal_error", ErrorResult, "Internal server error")
 
 		HTTP(func() {
@@ -889,6 +998,7 @@ var _ = Service("ContractWorkflowEngine", func() {
 
 			Response(StatusOK)
 			Response("bad_request", StatusBadRequest)
+			Response("forbidden", StatusForbidden)
 			Response("internal_error", StatusInternalServerError)
 		})
 	})
@@ -1065,6 +1175,31 @@ var _ = Service("ContractWorkflowEngine", func() {
 
 		HTTP(func() {
 			POST("/contract/terminate")
+			Response(StatusOK)
+			Response("bad_request", StatusBadRequest)
+			Response("internal_error", StatusInternalServerError)
+		})
+	})
+
+	Method("renew", func() {
+		Description("renew a contract: create a new linked contract instance from an existing one, retaining references to the original's DID, version, and signatures (DCS-FR-CWE-11/22, DCS-FR-CSA-15).")
+		Meta("dcs:requirements", "DCS-FR-CWE-11", "DCS-FR-CWE-22", "DCS-FR-CSA-15")
+		Meta("dcs:cwe:components", "")
+		Meta("dcs:ui", "Contract Management Dashboard")
+
+		Security(JWTAuth, func() {
+			Scope("Contract Manager")
+			Scope("Sys. Contract Manager")
+		})
+
+		Payload(ContractRenewRequest)
+		Result(ContractRenewResponse)
+
+		Error("bad_request", ErrorResult, "Bad request")
+		Error("internal_error", ErrorResult, "Internal server error")
+
+		HTTP(func() {
+			POST("/contract/renew")
 			Response(StatusOK)
 			Response("bad_request", StatusBadRequest)
 			Response("internal_error", StatusInternalServerError)

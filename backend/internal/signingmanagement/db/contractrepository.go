@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,11 +13,19 @@ import (
 	"digital-contracting-service/internal/base/datatype"
 )
 
+// ErrSignatureNotFound reports a revocation (or lookup) that named a signer
+// with no matching signature row on the contract — surfaced instead of
+// letting a zero-row UPDATE pass as success.
+var ErrSignatureNotFound = errors.New("signature not found")
+
 type Responsible struct {
 	Creator     string   `json:"creator"`
 	Approvers   []string `json:"approvers"`
 	Reviewers   []string `json:"reviewers"`
 	Negotiators []string `json:"negotiators"`
+	// Counterparty is the single peer DCS this contract is offered to (ADR-13);
+	// with the origin it forms the two signing parties.
+	Counterparty string `json:"counterparty"`
 }
 
 func (r Responsible) Value() (driver.Value, error) {
@@ -107,6 +116,11 @@ type ContractSignature struct {
 	CeremonyID     *string    `db:"ceremony_id"`
 	PDFHash        *string    `db:"pdf_hash"`
 	ContentHash    *string    `db:"content_hash"`
+	FieldName      *string    `db:"field_name"`
+	// JAdESSignature is the ETSI TS 119 182-1 compact JWS over the JSON-LD
+	// contract representation (DCS-FR-SM-02/-11) — the machine-readable
+	// counterpart to the visible PAdES signature on the PDF.
+	JAdESSignature *string `db:"jades_signature"`
 }
 
 type ContractSignatureEnvelope struct {
@@ -135,6 +149,12 @@ type SignatureRecord struct {
 	SignedAt       *time.Time `db:"signed_at"`
 	RevokedAt      *time.Time `db:"revoked_at"`
 	CertRevokedAt  *time.Time `db:"cert_revoked_at"`
+	// FieldName is the declared signature field this signature covers
+	// (DCS-FR-SM-07/-17); nil on the single-signer flow.
+	FieldName *string `db:"field_name"`
+	// JAdESSignature is the ETSI TS 119 182-1 compact JWS over the JSON-LD
+	// contract representation (DCS-FR-SM-02/-11).
+	JAdESSignature *string `db:"jades_signature"`
 }
 
 type ContractRepo interface {
@@ -142,6 +162,7 @@ type ContractRepo interface {
 	ReadProcessDataByDID(ctx context.Context, tx *sqlx.Tx, did string) (*ContractProcessData, error)
 	ReadAllMetaData(ctx context.Context, tx *sqlx.Tx, pagination datatype.Pagination) ([]ContractMetadata, error)
 	UpdateState(ctx context.Context, tx *sqlx.Tx, did string, state string) error
+	UpdateContractData(ctx context.Context, tx *sqlx.Tx, did string, contractData datatype.JSON) error
 
 	CreateSignature(ctx context.Context, tx *sqlx.Tx, signature ContractSignature) error
 	// SetSignedPDF points the contract at the PAdES-signed PDF artefact in IPFS

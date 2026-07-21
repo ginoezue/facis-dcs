@@ -12,8 +12,6 @@ RUN npm ci
 
 # Copy frontend source
 COPY frontend/ClientApp/ ./
-COPY docs/semantic-ontology/ /docs/semantic-ontology/
-COPY docs/ontology/ /docs/ontology/
 
 # Build frontend (type-checking skipped — use build:docker to avoid blocking on TS errors)
 RUN npm run build:docker
@@ -29,14 +27,16 @@ WORKDIR /build
 # Copy go mod files
 COPY backend/go.mod backend/go.sum ./
 
-# Download dependencies
-RUN go mod download
+# Download dependencies ("all" also covers cmd/goa's tool-only deps so the
+# gen step below runs entirely from the module cache).
+RUN go mod download all
 
 # Copy source code
 COPY backend/ ./
 
-# Generate Goa transport/types from the design package.
-RUN go run goa.design/goa/v3/cmd/goa@v3.24.2 gen digital-contracting-service/design
+# Generate Goa transport/types from the design package, at the goa version
+# pinned in go.mod. GOPROXY=off keeps the step hermetic.
+RUN GOPROXY=off go run goa.design/goa/v3/cmd/goa gen digital-contracting-service/design
 
 # Build binary (cgo enabled so the PKCS#11 signing path links).
 RUN CGO_ENABLED=1 GOOS=linux go build -o dcs ./cmd/dcs
@@ -105,8 +105,7 @@ COPY --from=go-builder --chown=$DOCKER_USER:$DOCKER_USER \
 
 # Copy generated OpenAPI spec from go-builder stage
 COPY --from=go-builder /build/gen/http/openapi3.json /app/gen/http/openapi3.json
-COPY --chown=$DOCKER_USER:$DOCKER_USER docs/semantic-ontology/ /app/docs/semantic-ontology/
-COPY --chown=$DOCKER_USER:$DOCKER_USER docs/ontology/ /app/docs/ontology/
+COPY --chown=$DOCKER_USER:$DOCKER_USER docs/policies/ /app/docs/policies/
 
 # Copy built frontend from frontend-builder stage
 COPY --from=frontend-builder --chown=$DOCKER_USER:$DOCKER_USER /frontend/dist /app/web/dist

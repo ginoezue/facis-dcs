@@ -1,42 +1,23 @@
-"""BDD steps for the 'odrl-soundness' requirement (Workstream F,
-docs/anforderung.md) — Prüfmittel=BDD ACs only:
+"""BDD steps for ODRL soundness (features/18_odrl_soundness; SRS
+DCS-FR-PACM-03).
 
-  AC1 — all rules of a document inside ONE enclosing odrl:Set (uid = the
-        contract DID), odrl:profile declared.
-  AC2 — every rule carries exactly one odrl:action.
-  AC3 — every rule carries odrl:assigner/odrl:assignee + odrl:target.
-  AC4 — a contract with a violated constraint cannot be approved (UI/API
-        entry path; the peer-action entry path dispatches through the same
-        command.Approver handler per the architect's note and is not
-        separately re-tested here).
-  AC5 — a contract with a violated constraint cannot be signed, even via a
-        direct raw API call.
-  AC6 — server-side operator evaluation covers eq/neq/isAnyOf/isNoneOf/
-        gteq/lteq/gt/lt correctly (Scenario Outline).
-  AC7 — a contract with SATISFIED constraints is not falsely rejected
-        (positive counter-test to AC4/AC5).
-  AC8 — the legacy bare-Duty policy shape (no action, no enclosing Set) is
-        explicitly rejected by structural validation.
+The structure and enforcement scenarios build their fixtures against the
+canonical Offer/Agreement-enclosed ODRL shape the backend emits and validates
+(`extractContractODRLPolicies`,
+backend/internal/base/validation/contractcontentaudit.go). Testing
+enforcement against the enclosed shape is what catches the regression where
+the emitted shape and the extraction drift apart — approve/apply would then
+silently see zero policies and let everything through.
 
-AC9 (manueller-Drill), AC10/AC11 (extern-validiert), AC12 (BDD but explicitly
-"nice-to-have, nur falls Kapazität" per the analyst) are deliberately NOT
-implemented here — see the feature file header for the full rationale.
+The operator Scenario Outline and the bare-shape rejection scenario use
+the bare flat-array fixture instead: operator evaluation is independent of
+the enclosing Set (and additionally covered by the Go unit tests in
+backend/internal/base/validation/contractcontentaudit_test.go), and the
+bare-Duty shape (no action, no enclosing policy node) must be REJECTED by structural validation.
 
-AC1/AC2/AC3/AC4/AC5/AC7 deliberately build their fixtures against the TARGET
-odrl:Set-enclosed shape (Workstream F1), per the architect's explicit
-instruction: `extractContractODRLPolicies`
-(backend/internal/base/validation/contractcontentaudit.go:897) reads
-`dcs:policies` as a flat array TODAY; once the implementer migrates the
-emitted shape to an enclosing `odrl:Set`, that extraction MUST be migrated in
-the same change or the enforcement in approve.go/apply.go silently sees zero
-policies and lets everything through. Testing AC4/AC5/AC7 against the NEW
-shape (not the old flat array) is what would catch that regression.
-
-AC6/AC8 deliberately use the CURRENT legacy flat-array shape: AC6 is about
-operator-evaluation correctness, which already works today independent of
-the enclosing-Set migration (and is additionally covered by the Go unit
-tests in backend/internal/base/validation/contractcontentaudit_test.go); AC8
-is specifically about that legacy shape being rejected once F1/F3 land.
+The peer-action entry path is not separately re-tested: it dispatches
+through the same command.Approver handler as the UI/API path (see the
+feature file header).
 """
 
 from behave import given, then, when
@@ -48,9 +29,9 @@ from steps.support.api_client import (
     get_with_headers,
     post_json,
     put_json,
-    signature_apply_url,
 )
 from steps.support.services import odrl_fixture_service as odrl
+from steps.support.signing import wallet_sign
 from steps.support.services.auth_service import AuthService
 from steps.support.services.contract_service import ContractService
 
@@ -89,6 +70,14 @@ def _update_contract_policies(context, name, field, policies, actual_value):
     did, updated_at = ContractService._contract_data(context, name)
     headers = context.contract_seed_headers[name]
     doc = odrl.build_contract_document(did, field, policies, actual_value)
+    # A full-document PUT replaces contract_data wholesale, so carry the
+    # signature field(s) seeded at genesis (keyed by the signer's party DID)
+    # forward — dropping them leaves the contract unsignable.
+    current = get_with_headers(context, contract_retrieve_by_id_url(context, did), headers=headers)
+    if current.status_code == 200:
+        sig_fields = (current.json().get("contract_data") or {}).get("dcs:signatureFields")
+        if sig_fields:
+            doc["dcs:signatureFields"] = sig_fields
     resp = put_json(
         context,
         contract_update_url(context),
@@ -146,14 +135,14 @@ def step_when_policies_updated_to_odrl_set(context, name, rule_type, field, oper
 
 
 @when(
-    'the policies of contract "{name}" are updated to the legacy bare-Duty '
+    'the policies of contract "{name}" are updated to the bare-Duty '
     'form (field "{field}", operator "{operator}") requiring "{right_operand}" '
     'while the actual value is "{actual_value}"'
 )
-def step_when_policies_updated_to_legacy_form(context, name, field, operator, right_operand, actual_value):
+def step_when_policies_updated_to_bare_duty_form(context, name, field, operator, right_operand, actual_value):
     right = _parse_operand(right_operand)
     actual = _parse_operand(actual_value)
-    policies = odrl.legacy_bare_duty_policies(field, operator, right)
+    policies = odrl.bare_duty_policies(field, operator, right)
     context.requests_response = _update_contract_policies(context, name, field, policies, actual)
 
 
@@ -163,12 +152,12 @@ def step_when_policies_updated_to_legacy_form(context, name, field, operator, ri
     'while the actual value is "{actual_value}"'
 )
 def step_given_operator_fixture(context, name, field, operator, right_operand, actual_value):
-    # Deliberately the TARGET odrl:Set shape (not the legacy flat form) — a
-    # fixture identical in shape to AC8's rejected legacy form cannot also be
-    # the accepted fixture AC6 approves against; the two ACs would be
-    # mutually unsatisfiable otherwise. AC6 is about operator-evaluation
-    # correctness, which is exercised identically regardless of the
-    # enclosing shape, and is additionally covered by the Go unit tests in
+    # Deliberately the canonical enclosing-policy shape (not the bare flat form):
+    # a fixture identical in shape to the rejected bare form cannot also
+    # be the accepted fixture the operator scenarios approve against; the
+    # two would be mutually unsatisfiable otherwise. Operator-evaluation
+    # correctness is exercised identically regardless of the enclosing
+    # shape, and is additionally covered by the Go unit tests in
     # backend/internal/base/validation/contractcontentaudit_test.go.
     ContractService._create_contract_in_draft(context, name)
     did, _ = ContractService._contract_data(context, name)
@@ -211,13 +200,11 @@ def step_when_full_workflow_to_signed(context, name):
 @when('a direct signing API call is attempted against contract "{name}" before it is approved')
 def step_when_direct_sign_before_approval(context, name):
     _advance_to_reviewed(context, name)
-    did, updated_at = ContractService._contract_data(context, name)
-    signer_h = AuthService.get_headers_for_roles(["Contract Signer"])
-    context.requests_response = post_json(
-        context,
-        signature_apply_url(context),
-        {"did": did, "signer_did": "did:example:bdd-odrl-signer", "updated_at": updated_at},
-        headers=signer_h,
+    did, _updated_at = ContractService._contract_data(context, name)
+    # Signing an un-APPROVED contract must be refused; the transition gate in
+    # /signature/prepare rejects it before any signature is produced.
+    context.requests_response = wallet_sign(
+        context, did, signer_did="did:example:bdd-odrl-signer", signatory="bdd-odrl-signer"
     )
     if context.requests_response.status_code == 200:
         ContractService._refresh_contract(context, name)
@@ -238,46 +225,53 @@ def step_then_policy_update_accepted(context, name):
 
 
 @then(
-    'the policy update for contract "{name}" is rejected because the legacy '
+    'the policy update for contract "{name}" is rejected because the '
     "bare-Duty form lacks an action and enclosing policy"
 )
-def step_then_policy_update_rejected_legacy(context, name):
+def step_then_policy_update_rejected_bare_duty(context, name):
     resp = context.requests_response
     assert resp.status_code != 200, (
-        f"expected the legacy bare-Duty policy shape (no odrl:action, no "
-        f"enclosing odrl:Set, no parties/target) to be explicitly rejected "
+        f"expected the bare-Duty policy shape (no odrl:action, no "
+        f"enclosing policy node, no parties/target) to be explicitly rejected "
         f"by structural validation for '{name}', but the update succeeded: "
         f"{resp.status_code} {resp.text}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Then — structural assertions (AC1/AC2/AC3)
+# Then — structural assertions
 # ---------------------------------------------------------------------------
 
 
 @then(
     'the stored policies of contract "{name}" form a single enclosing '
-    "odrl:Set whose uid equals the contract DID and which declares an "
-    "odrl:profile"
+    '{policy_type} whose @id is anchored to the contract DID and which '
+    "declares an odrl:profile"
 )
-def step_then_policies_form_enclosing_set(context, name):
+def step_then_policies_form_enclosing_set(context, name, policy_type):
+    """policy_type reflects the ODRL policy lifecycle: an unsigned contract
+    instance carries an odrl:Offer (parties still open); the first signature
+    seals it into the odrl:Agreement the signatures bind."""
     did, _ = ContractService._contract_data(context, name)
     policies = _stored_policies(context, name)
     assert isinstance(policies, dict), (
-        f"expected dcs:policies to be ONE enclosing object (odrl:Set), got a "
+        f"expected dcs:policies to be ONE enclosing policy object, got a "
         f"{type(policies).__name__}: {policies!r}"
     )
-    assert policies.get("@type") == "odrl:Set", (
-        f"expected the enclosing policy node's @type to be 'odrl:Set', got "
-        f"{policies.get('@type')!r}"
+    assert policies.get("@type") == policy_type, (
+        f"expected the enclosing policy node's @type to be {policy_type!r}, "
+        f"got {policies.get('@type')!r}"
     )
-    assert policies.get("uid") == did, (
-        f"expected the odrl:Set's uid to equal the contract DID {did!r}, got "
-        f"{policies.get('uid')!r}"
+    policy_id = policies.get("@id") or ""
+    assert did in policy_id, (
+        f"expected the {policy_type}'s @id (its odrl:uid) to be anchored to the "
+        f"contract DID {did!r}, got {policy_id!r}"
+    )
+    assert "uid" not in policies, (
+        f"a separate uid key duplicates the policy identity (@id): {policies.get('uid')!r}"
     )
     profile = policies.get("odrl:profile")
-    assert profile, f"expected odrl:profile to be declared on the enclosing odrl:Set, got: {profile!r}"
+    assert profile, f"expected odrl:profile to be declared on the enclosing {policy_type}, got: {profile!r}"
 
 
 @then('every stored policy rule of contract "{name}" declares exactly one odrl:action')
@@ -307,7 +301,7 @@ def step_then_every_rule_has_parties_and_target(context, name):
 
 
 # ---------------------------------------------------------------------------
-# Then — enforcement outcomes (AC4/AC5/AC7)
+# Then — enforcement outcomes
 # ---------------------------------------------------------------------------
 
 
@@ -333,12 +327,15 @@ def step_then_sign_attempt_rejected(context, name):
 
 @then('the contract "{name}" reaches SIGNED state')
 def step_then_contract_reaches_signed(context, name):
+    # ACTIVE is reachable exclusively from SIGNED via the automatic
+    # deployment chain's real target acknowledgement
+    # (contractstate.Transitions), so observing it proves SIGNED was reached.
     state = _contract_state(context, name)
-    assert state == "SIGNED", f"expected contract '{name}' to reach SIGNED, got '{state}'"
+    assert state in ("SIGNED", "ACTIVE"), f"expected contract '{name}' to reach SIGNED, got '{state}'"
 
 
 # ---------------------------------------------------------------------------
-# Then — operator matrix outcome (AC6, Scenario Outline)
+# Then — operator matrix outcome (Scenario Outline)
 # ---------------------------------------------------------------------------
 
 

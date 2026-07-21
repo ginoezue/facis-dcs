@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,8 +14,7 @@ import (
 	"strings"
 
 	compiler "example.com/m/V2/compiler"
-
-	"time"
+	"example.com/m/V2/manifest"
 
 	"github.com/google/uuid"
 )
@@ -27,24 +25,46 @@ func setPDFCoreVersionHeader(w http.ResponseWriter) {
 	w.Header().Set("X-PDF-Core-Version", compiler.RendererVersion)
 }
 
-// signingContext returns the request context carrying the bearer token the DCS
-// backend forwarded. The compiler presents it when it calls back to the
-// backend's internal C2PA signing endpoint (DCS-IR-HI-01).
-func signingContext(r *http.Request) context.Context {
-	token, err := extractBearerToken(r.Header.Get("Authorization"))
-	if err != nil {
-		return r.Context()
-	}
-	return compiler.WithBearerToken(r.Context(), token)
+// preparedResponse is the JSON body the render endpoints (/render,
+// /render/amendment) return: the compiled PDF with zeroed 64-byte C2PA COSE
+// signature slots, and the C2PA COSE Sig_structures the DCS backend must sign (in
+// document order). These are the provenance-manifest signatures, NOT the PAdES
+// signature — the DCS signs each with its dcs-c2pa key and posts them to
+// /c2pa/embed; pdf-core holds no key material.
+type preparedResponse struct {
+	PDFBase64         string   `json:"pdf_base64"`
+	C2PASigStructures []string `json:"c2pa_sig_structures"`
 }
 
-// extractBearerToken parses "Bearer <token>" from an Authorization header value.
-func extractBearerToken(authHeader string) (string, error) {
-	const prefix = "Bearer "
-	if !strings.HasPrefix(authHeader, prefix) {
-		return "", errors.New("no bearer token")
+// embedRequest is the JSON body /c2pa/embed accepts: a prepared PDF and the C2PA
+// ES256 signatures for its zeroed slots, in the same order /render returned the
+// Sig_structures.
+type embedRequest struct {
+	PDFBase64      string   `json:"pdf_base64"`
+	C2PASignatures []string `json:"c2pa_signatures"`
+}
+
+// writePrepared writes the prepare JSON envelope. A render stabilises its byte
+// layout over several passes and signs each, but only the last pass survives into
+// pdf; the surviving zeroed slots are filled by exactly the final pass's
+// signings, which are the last len(slots) captures in document order.
+func writePrepared(w http.ResponseWriter, pdf []byte, captured [][]byte) {
+	slots := compiler.CountZeroedCOSESignatureSlots(pdf)
+	if slots > len(captured) {
+		writeError(w, errBadRequest(fmt.Errorf("compiled PDF has %d empty signature slots but only %d were captured", slots, len(captured))))
+		return
 	}
-	return strings.TrimPrefix(authHeader, prefix), nil
+	surviving := captured[len(captured)-slots:]
+	resp := preparedResponse{
+		PDFBase64:         base64.StdEncoding.EncodeToString(pdf),
+		C2PASigStructures: make([]string, len(surviving)),
+	}
+	for i, sig := range surviving {
+		resp.C2PASigStructures[i] = base64.StdEncoding.EncodeToString(sig)
+	}
+	setPDFCoreVersionHeader(w)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // service implements all HTTP handlers for the DCS-PDF-CORE API.
@@ -146,7 +166,7 @@ func (s *service) version(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"version": compiler.RendererVersion})
 }
 
-func (s *service) download(w http.ResponseWriter, r *http.Request) {
+func (s *service) render(w http.ResponseWriter, r *http.Request) {
 	if err := checkMediaType(r.Header.Get("Content-Type"), "application/ld+json", "application/json"); err != nil {
 		writeError(w, err)
 		return
@@ -165,14 +185,15 @@ func (s *service) download(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errBadRequest(err))
 		return
 	}
-	pdf, err := compiler.CompilePDF(signingContext(r), canonical, time.Now())
+	signer := compiler.NewCapturingSigner()
+	// Pass the verbatim raw payload: CompilePDF canonicalizes internally for the
+	// render model + graph hash, but embeds these exact bytes as the attachment.
+	pdf, err := compiler.CompilePDF(compiler.WithSigner(r.Context(), signer), raw, compiler.CanonicalCompiledAt)
 	if err != nil {
 		writeError(w, errBadRequest(err))
 		return
 	}
-	setPDFCoreVersionHeader(w)
-	w.Header().Set("Content-Type", "application/pdf")
-	_, _ = w.Write(pdf)
+	writePrepared(w, pdf, signer.Captured())
 }
 
 // verifyResponse is the JSON body returned by POST /verify.
@@ -198,7 +219,7 @@ func (s *service) verify(w http.ResponseWriter, r *http.Request) {
 	var payload []byte
 
 	if _, ok := compiler.SplitAtIncrementalUpdate(raw); ok {
-		if err := compiler.VerifyIncrementalUpdate(signingContext(r), raw); err != nil {
+		if err := compiler.VerifyIncrementalUpdate(compiler.WithSigner(r.Context(), compiler.NewCapturingSigner()), raw); err != nil {
 			writeError(w, errConflict(err))
 			return
 		}
@@ -218,7 +239,7 @@ func (s *service) verify(w http.ResponseWriter, r *http.Request) {
 			writeError(w, errBadRequest(fmt.Errorf("extract lifecycle timestamp: %w", err)))
 			return
 		}
-		recompiled, err := compiler.CompilePDF(signingContext(r), payload, compiledAt)
+		recompiled, err := compiler.CompilePDF(compiler.WithSigner(r.Context(), compiler.NewCapturingSigner()), payload, compiledAt)
 		if err != nil {
 			writeError(w, errUnprocessableEntity(err))
 			return
@@ -233,6 +254,17 @@ func (s *service) verify(w http.ResponseWriter, r *http.Request) {
 			writeError(w, errConflict(errors.New("embedded payload does not reproduce the submitted PDF")))
 			return
 		}
+		// An unsigned base must be byte-EQUAL to its deterministic recompile. The
+		// only legitimate bytes appended after a compiled base are a PAdES
+		// signature layer (which makes the PDF signed) or a dcs incremental update
+		// (handled by the branch above via its marker). Trailing content on an
+		// otherwise-unsigned PDF is an offline amendment made outside /update —
+		// reject it (DCS-OR-C2PA-002 tamper-evidence).
+		if !compiler.IsPAdESSigned(raw) &&
+			len(compiler.ZeroCOSESignatures(raw)) != len(compiler.ZeroCOSESignatures(recompiled)) {
+			writeError(w, errConflict(errors.New("submitted PDF was amended offline, outside the /update workflow")))
+			return
+		}
 	}
 
 	// Extract VC attachment if present — returned to the caller so it can
@@ -241,7 +273,7 @@ func (s *service) verify(w http.ResponseWriter, r *http.Request) {
 	vcProofValid := vcFound && len(vcBytes) > 0 && isVCProofStructurallyValid(vcBytes)
 
 	// Append a verification witness and embed the resulting PDF as artifact.
-	witness, err := compiler.AppendVerificationWitness(signingContext(r), raw, payload)
+	witness, err := compiler.AppendVerificationWitness(compiler.WithSigner(r.Context(), compiler.NewCapturingSigner()), raw, payload)
 	if err != nil {
 		writeError(w, errBadRequest(fmt.Errorf("append verification witness: %w", err)))
 		return
@@ -261,6 +293,50 @@ func (s *service) verify(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// verifyContent checks ONLY that the submitted PDF's visible page content is the
+// deterministic render of its own embedded machine-readable payload, tolerant of
+// C2PA / signature / amendment incremental-update layers appended after the base
+// (which /verify's byte-prefix reproduction check rejects). This is the legal
+// human↔machine guarantee a DCS applies to a peer-received PDF that may already
+// carry appended manifests: tampering of the visible document fails, an
+// already-C2PA-amended offer passes.
+func (s *service) verifyContent(w http.ResponseWriter, r *http.Request) {
+	if err := checkMediaType(r.Header.Get("Content-Type"), "application/pdf"); err != nil {
+		writeError(w, err)
+		return
+	}
+	raw, err := limitRead(r.Body, 32<<20)
+	if err != nil {
+		writeError(w, errBadRequest(err))
+		return
+	}
+	payload, err := compiler.ExtractLatestEmbeddedJSONLD(raw)
+	if err != nil {
+		writeError(w, errBadRequest(err))
+		return
+	}
+	compiledAt, err := compiler.ExtractLifecycleEffectiveAt(raw)
+	if err != nil {
+		writeError(w, errBadRequest(fmt.Errorf("extract lifecycle timestamp: %w", err)))
+		return
+	}
+	recompiled, err := compiler.CompilePDF(compiler.WithSigner(r.Context(), compiler.NewCapturingSigner()), payload, compiledAt)
+	if err != nil {
+		writeError(w, errUnprocessableEntity(err))
+		return
+	}
+	var mismatch string
+	if err := compiler.MatchPageContent(raw, recompiled); err != nil {
+		mismatch = err.Error()
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(struct {
+		Match    bool   `json:"match"`
+		Mismatch string `json:"mismatch,omitempty"`
+	}{Match: mismatch == "", Mismatch: mismatch})
+}
+
 // isVCProofStructurallyValid returns true when the VC JSON contains a
 // recognisable proof field, without performing cryptographic verification.
 func isVCProofStructurallyValid(vcBytes []byte) bool {
@@ -272,7 +348,7 @@ func isVCProofStructurallyValid(vcBytes []byte) bool {
 	return ok
 }
 
-func (s *service) update(w http.ResponseWriter, r *http.Request) {
+func (s *service) renderAmendment(w http.ResponseWriter, r *http.Request) {
 	ct := r.Header.Get("Content-Type")
 	if err := checkMediaType(ct, "multipart/form-data"); err != nil {
 		writeError(w, err)
@@ -318,12 +394,16 @@ func (s *service) update(w http.ResponseWriter, r *http.Request) {
 	}
 	vcBytes := parts["vc"] // optional
 	// manifest_url (DCS-OR-C2PA-008 AC3): when the DCS hosting layer supplies a
-	// public manifest URL, it is embedded as the C2PA claim's remote_manifests
-	// field. Absent (the default) => no remote_manifests entry is emitted.
+	// public manifest URL, it is embedded via a dcs.remote_manifests C2PA
+	// assertion (not a claim field — c2pa-rs 0.85.1 hard-rejects an
+	// unrecognized "remote_manifests" claim field, see the comment in
+	// renderVerificationClaimCBOR) plus an XMP dcterms:provenance link.
+	// Absent (the default) => neither is emitted.
 	manifestURL := strings.TrimSpace(string(parts["manifest_url"]))
 
-	now := time.Now()
-	updated, err := compiler.UpdatePDFWithOptions(signingContext(r), oldPDF, canonical, vcBytes, manifestURL, now)
+	signer := compiler.NewCapturingSigner()
+	// Verbatim: the amended attachment is embedded exactly as submitted.
+	updated, err := compiler.UpdatePDFWithOptions(compiler.WithSigner(r.Context(), signer), oldPDF, newPayload, vcBytes, manifestURL, compiler.CanonicalCompiledAt)
 	if err != nil {
 		if errors.Is(err, compiler.ErrNoChanges) {
 			writeError(w, errConflict(err))
@@ -332,12 +412,58 @@ func (s *service) update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errBadRequest(err))
 		return
 	}
-	setPDFCoreVersionHeader(w)
-	w.Header().Set("Content-Type", "application/pdf")
-	_, _ = w.Write(updated)
+	writePrepared(w, updated, signer.Captured())
 }
 
-func (s *service) sign(w http.ResponseWriter, r *http.Request) {
+// embedC2PASignatures is the stateless "embed" step: it splices the DCS backend's
+// ES256 signatures into the zeroed COSE slots a prepare left behind. It parses no
+// domain content and holds no key — it only fills byte runs pdf-core itself
+// reserved, so any replica can serve it.
+func (s *service) embedC2PASignatures(w http.ResponseWriter, r *http.Request) {
+	if err := checkMediaType(r.Header.Get("Content-Type"), "application/json"); err != nil {
+		writeError(w, err)
+		return
+	}
+	raw, err := limitRead(r.Body, 32<<20)
+	if err != nil {
+		writeError(w, errBadRequest(err))
+		return
+	}
+	var req embedRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		writeError(w, errBadRequest(fmt.Errorf("decode embed request: %w", err)))
+		return
+	}
+	pdf, err := base64.StdEncoding.DecodeString(req.PDFBase64)
+	if err != nil {
+		writeError(w, errBadRequest(fmt.Errorf("decode prepared pdf: %w", err)))
+		return
+	}
+	signatures := make([][]byte, len(req.C2PASignatures))
+	for i, s := range req.C2PASignatures {
+		sig, decErr := base64.StdEncoding.DecodeString(s)
+		if decErr != nil {
+			writeError(w, errBadRequest(fmt.Errorf("decode signature %d: %w", i, decErr)))
+			return
+		}
+		signatures[i] = sig
+	}
+	embedded, err := compiler.InjectCOSESignatures(pdf, signatures)
+	if err != nil {
+		writeError(w, errUnprocessableEntity(err))
+		return
+	}
+	setPDFCoreVersionHeader(w)
+	w.Header().Set("Content-Type", "application/pdf")
+	_, _ = w.Write(embedded)
+}
+
+// embedEvidence attaches the posted signing evidence to the PDF without signing
+// it. It is the attach-only half of the embed-first-sign-second contract that a
+// remote signer (EU DSS) needs: the DSS signDocument call does not attach, so
+// the evidence must already be embedded — and therefore covered by the PAdES
+// /ByteRange — before the DSS produces the signature (DCS-FR-SM-08).
+func (s *service) embedEvidence(w http.ResponseWriter, r *http.Request) {
 	ct := r.Header.Get("Content-Type")
 	if err := checkMediaType(ct, "multipart/form-data"); err != nil {
 		writeError(w, err)
@@ -367,34 +493,21 @@ func (s *service) sign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errBadRequest(errors.New("pdf field required")))
 		return
 	}
-	fieldName := strings.TrimSpace(string(parts["field_name"]))
-	if fieldName == "" {
-		writeError(w, errBadRequest(errors.New("field_name field required")))
+	evidence, ok := parts["evidence"]
+	if !ok || len(evidence) == 0 {
+		writeError(w, errBadRequest(errors.New("evidence field required")))
 		return
 	}
-	signatoryName := strings.TrimSpace(string(parts["signatory_name"]))
-	if signatoryName == "" {
-		signatoryName = fieldName
-	}
-	evidence := parts["evidence"] // optional
 
-	// Embed-first-sign-second: the identity evidence is attached before signing
-	// so the PAdES ByteRange covers it (DCS-FR-SM-08).
 	embedded, err := compiler.EmbedSigningEvidence(pdfBytes, evidence)
 	if err != nil {
 		writeError(w, errBadRequest(fmt.Errorf("embed signing evidence: %w", err)))
 		return
 	}
 
-	signed, err := compiler.SignPAdES(signingContext(r), embedded, fieldName, signatoryName)
-	if err != nil {
-		writeError(w, errBadRequest(fmt.Errorf("pades sign: %w", err)))
-		return
-	}
-
 	setPDFCoreVersionHeader(w)
 	w.Header().Set("Content-Type", "application/pdf")
-	_, _ = w.Write(signed)
+	_, _ = w.Write(embedded)
 }
 
 func (s *service) extractEvidence(w http.ResponseWriter, r *http.Request) {
@@ -464,16 +577,16 @@ func (s *service) claim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errBadRequest(err))
 		return
 	}
-	canonicalPDF, err := compiler.CompilePDF(signingContext(r), canonical, time.Now())
+	referencePDF, err := compiler.CompilePDF(compiler.WithSigner(r.Context(), compiler.NewCapturingSigner()), payloadBytes, compiler.CanonicalCompiledAt)
 	if err != nil {
 		writeError(w, errBadRequest(err))
 		return
 	}
-	if err := compiler.MatchPageContent(submittedPDF, canonicalPDF); err != nil {
+	if err := compiler.MatchPageContent(submittedPDF, referencePDF); err != nil {
 		writeError(w, errConflict(err))
 		return
 	}
-	result, err := compiler.AppendVerificationWitness(signingContext(r), canonicalPDF, canonical)
+	result, err := compiler.AppendVerificationWitness(compiler.WithSigner(r.Context(), compiler.NewCapturingSigner()), referencePDF, payloadBytes)
 	if err != nil {
 		writeError(w, errBadRequest(err))
 		return
@@ -492,13 +605,63 @@ func (s *service) extractManifest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errBadRequest(err))
 		return
 	}
-	manifest, err := compiler.ExtractManifestStore(raw)
+	manifestStore, err := compiler.ExtractManifestStore(raw)
 	if err != nil {
 		writeError(w, errBadRequest(err))
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	_, _ = w.Write(manifest)
+	_, _ = w.Write(manifestStore)
+}
+
+// extractPayload returns the machine-readable JSON-LD contract payload embedded
+// in the PDF (the latest version). A peer that receives a contract PDF rebuilds
+// its local copy from this; the DCS never parses PDF bytes itself (ADR-13).
+func (s *service) extractPayload(w http.ResponseWriter, r *http.Request) {
+	if err := checkMediaType(r.Header.Get("Content-Type"), "application/pdf"); err != nil {
+		writeError(w, err)
+		return
+	}
+	raw, err := limitRead(r.Body, 32<<20)
+	if err != nil {
+		writeError(w, errBadRequest(err))
+		return
+	}
+	payload, err := compiler.ExtractLatestEmbeddedJSONLD(raw)
+	if err != nil {
+		writeError(w, errBadRequest(err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/ld+json")
+	_, _ = w.Write(payload)
+}
+
+// manifestChain extracts the embedded C2PA manifest store and returns its
+// parsed manifest chain (one entry per manifest, oldest first, with each
+// manifest's dcs.lifecycle assertion). All JUMBF/CBOR byte parsing lives here
+// in pdf-core; the DCS consumes the structured chain.
+func (s *service) manifestChain(w http.ResponseWriter, r *http.Request) {
+	if err := checkMediaType(r.Header.Get("Content-Type"), "application/pdf"); err != nil {
+		writeError(w, err)
+		return
+	}
+	raw, err := limitRead(r.Body, 32<<20)
+	if err != nil {
+		writeError(w, errBadRequest(err))
+		return
+	}
+	store, err := compiler.ExtractManifestStore(raw)
+	if err != nil {
+		writeError(w, errBadRequest(err))
+		return
+	}
+	chain, err := manifest.ParseChain(store)
+	if err != nil {
+		writeError(w, errBadRequest(err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(chain)
 }
 
 func (s *service) ontologyContext(w http.ResponseWriter, _ *http.Request) {

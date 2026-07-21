@@ -2,6 +2,7 @@ package contracttemplate
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,7 +10,6 @@ import (
 	"digital-contracting-service/internal/base/validation"
 	contractdb "digital-contracting-service/internal/contractworkflowengine/db"
 	semanticmapper "digital-contracting-service/internal/semantic/mapper"
-	templatedb "digital-contracting-service/internal/templaterepository/db"
 
 	"github.com/stretchr/testify/require"
 )
@@ -27,7 +27,7 @@ func TestCreateTemplateThenNormalizeContract(t *testing.T) {
 	persistedTemplate, err := validation.NormalizeTemplateDataForPersistence(templateData, creationTemplateDID)
 	require.NoError(t, err)
 
-	contractDraft, err := convertTemplateDataToContractData(persistedTemplate, creationTemplateDID)
+	contractDraft, err := ConvertTemplateDataToContractData(persistedTemplate, creationTemplateDID)
 	require.NoError(t, err)
 
 	var contractData map[string]any
@@ -44,18 +44,6 @@ func TestCreateTemplateThenNormalizeContract(t *testing.T) {
 	assertCreationPipelinePolicies(t, persistedContract)
 
 	now := time.Date(2026, time.June, 19, 12, 0, 0, 0, time.UTC)
-	templateName := "DACH Service Agreement"
-	template := templatedb.ContractTemplate{
-		DID:          creationTemplateDID,
-		Version:      1,
-		State:        "APPROVED",
-		TemplateType: "COMPONENT",
-		Name:         &templateName,
-		CreatedBy:    "test-participant",
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		TemplateData: persistedTemplate,
-	}
 	contract := contractdb.Contract{
 		DID:             creationContractDID,
 		ContractVersion: 1,
@@ -66,7 +54,7 @@ func TestCreateTemplateThenNormalizeContract(t *testing.T) {
 		ContractData:    persistedContract,
 	}
 
-	published, err := semanticmapper.BuildContractJSONLD(contract, template, semanticmapper.DefaultProfile())
+	published, err := semanticmapper.BuildContractJSONLD(contract)
 	require.NoError(t, err)
 
 	var stored, returned map[string]any
@@ -149,32 +137,31 @@ func creationPipelineLayout() []any {
 }
 
 func creationPipelineRequirements() []any {
-	return []any{
-		creationPipelineRequirement("customer", "Customer", "CompanyParty", "customer",
-			creationPipelineField("customer", "legalName", "company.legalName"),
-			creationPipelineField("customer", "country", "company.location.country"),
-		),
-		creationPipelineRequirement("provider", "Provider", "CompanyParty", "provider",
-			creationPipelineField("provider", "legalName", "company.legalName"),
-			creationPipelineField("provider", "country", "company.location.country"),
-		),
-		creationPipelineRequirement("payment", "Payment", "ContractDataObject", "",
-			creationPipelineField("payment", "amount", "contract.payment.amount"),
-			creationPipelineField("payment", "currency", "contract.payment.currency"),
-		),
-		creationPipelineRequirement("availability", "Availability", "ContractDataObject", "",
-			creationPipelineField("availability", "availability", "service.sla.availability"),
-		),
-	}
+	placeholders := []any{}
+	placeholders = append(placeholders, creationPipelineRequirement("customer", "Customer", "CompanyParty", "customer",
+		creationPipelineField("customer", "legalName", "company.legalName"),
+		creationPipelineField("customer", "country", "company.location.country"),
+	)...)
+	placeholders = append(placeholders, creationPipelineRequirement("provider", "Provider", "CompanyParty", "provider",
+		creationPipelineField("provider", "legalName", "company.legalName"),
+		creationPipelineField("provider", "country", "company.location.country"),
+	)...)
+	placeholders = append(placeholders, creationPipelineRequirement("payment", "Payment", "ContractDataObject", "",
+		creationPipelineField("payment", "amount", "contract.payment.amount"),
+		creationPipelineField("payment", "currency", "contract.payment.currency"),
+	)...)
+	placeholders = append(placeholders, creationPipelineRequirement("availability", "Availability", "ContractDataObject", "",
+		creationPipelineField("availability", "availability", "service.sla.availability"),
+	)...)
+	return placeholders
 }
 
 func creationPipelinePolicyDefinitions() map[string]any {
 	return map[string]any{
 		"@id":          creationTemplateDID + "#policy-set-1",
-		"@type":        "odrl:Set",
-		"uid":          creationTemplateDID,
+		"@type":        "odrl:Offer",
 		"odrl:profile": map[string]any{"@id": "https://w3id.org/facis/dcs/ontology/v1/odrl-profile"},
-		"odrl:duty": []any{
+		"odrl:obligation": []any{
 			creationPipelinePolicy(
 				"provider-country-dach",
 				"provider",
@@ -244,7 +231,7 @@ func assertCreationPipelinePolicies(t *testing.T, raw *datatype.JSON) {
 	var data map[string]any
 	require.NoError(t, json.Unmarshal(*raw, &data))
 	policySet := data["dcs:policies"].(map[string]any)
-	policies := policySet["odrl:duty"].([]any)
+	policies := policySet["odrl:obligation"].([]any)
 
 	dach := creationPipelinePolicyBySuffix(t, policies, "policy-provider-country-dach")
 	dachConstraint := dach["odrl:constraint"].(map[string]any)
@@ -282,12 +269,8 @@ func creationPipelineClause(group string, content []any) map[string]any {
 	}
 }
 
-func creationPipelinePlaceholder(token string, conditionID string, parameterName string) map[string]any {
-	return map[string]any{
-		"@type":       "dcs:Placeholder",
-		"dcs:token":   token,
-		"dcs:bindsTo": map[string]any{"@id": creationPipelineFieldID(conditionID, parameterName)},
-	}
+func creationPipelinePlaceholder(_ string, conditionID string, parameterName string) map[string]any {
+	return map[string]any{"@id": creationPipelineFieldID(conditionID, parameterName)}
 }
 
 func creationPipelineLayoutNode(id string, root bool, children ...string) map[string]any {
@@ -305,39 +288,34 @@ func creationPipelineLayoutNode(id string, root bool, children ...string) map[st
 	return node
 }
 
+// creationPipelineRequirement flattens a condition's fields into the top-level
+// placeholder list — the clean self-contained model has no requirement grouping.
 func creationPipelineRequirement(
-	conditionID string,
-	name string,
-	entityType string,
-	entityRole string,
+	_ string,
+	_ string,
+	_ string,
+	_ string,
 	fields ...map[string]any,
-) map[string]any {
-	rawFields := make([]any, len(fields))
+) []any {
+	placeholders := make([]any, len(fields))
 	for index, field := range fields {
-		rawFields[index] = field
+		placeholders[index] = field
 	}
-	requirement := map[string]any{
-		"@id":               creationTemplateDID + "#requirement-" + conditionID,
-		"@type":             "dcs:DataRequirement",
-		"dcs:conditionId":   conditionID,
-		"dcs:name":          name,
-		"dcs:schemaVersion": "v1",
-		"dcs:entityType":    entityType,
-		"dcs:fields":        rawFields,
-	}
-	if entityRole != "" {
-		requirement["dcs:entityRole"] = entityRole
-	}
-	return requirement
+	return placeholders
 }
 
-func creationPipelineField(conditionID string, parameterName string, semanticPath string) map[string]any {
+func creationPipelineField(conditionID string, parameterName string, domainFieldName string) map[string]any {
+	datatype := "xsd:string"
+	if strings.Contains(domainFieldName, "amount") || strings.Contains(domainFieldName, "availability") {
+		datatype = "xsd:decimal"
+	}
 	return map[string]any{
-		"@id":               creationPipelineFieldID(conditionID, parameterName),
-		"@type":             "dcs:RequirementField",
-		"dcs:parameterName": parameterName,
-		"dcs:domainField": map[string]any{
-			"@id": "https://w3id.org/facis/dcs/taxonomy/v1#field-" + creationPipelineSlug(semanticPath),
+		"@id":          creationPipelineFieldID(conditionID, parameterName),
+		"@type":        "dcs:Placeholder",
+		"dcs:label":    parameterName,
+		"dcs:datatype": datatype,
+		"dcs:shape": map[string]any{
+			"@id": "https://w3id.org/facis/dcs/taxonomy/v1#field-" + creationPipelineSlug(domainFieldName),
 		},
 		"dcs:required": true,
 	}
@@ -361,6 +339,7 @@ func creationPipelinePolicy(
 		"odrl:assigner": map[string]any{"@id": creationTemplateDID + "#" + conditionID},
 		"odrl:assignee": map[string]any{"@id": creationTemplateDID},
 		"odrl:target":   map[string]any{"@id": creationTemplateDID},
+		"dcs:prose":     map[string]any{"@id": "urn:uuid:block-clause-1"},
 		"odrl:constraint": map[string]any{
 			"@type":             "odrl:Constraint",
 			"odrl:leftOperand":  map[string]any{"@id": creationPipelineFieldID(conditionID, parameterName)},

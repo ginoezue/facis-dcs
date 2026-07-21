@@ -43,6 +43,26 @@ func (e RemoteActionRequestEvent) GetDID() string {
 	return e.DID
 }
 
+// PdfRegeneratedEvent is emitted after the background regenerator stored a
+// contract's PDF (ADR-13). The DCS-to-DCS synchronizer consumes it to ship the
+// PDF to the counterparty on shippable transitions.
+type PdfRegeneratedEvent struct {
+	DID        string    `json:"did"`
+	IPFSCID    string    `json:"ipfs_cid"`
+	State      string    `json:"state"`
+	OccurredAt time.Time `json:"occurred_at"`
+}
+
+// EventType implements the Event interface.
+func (e PdfRegeneratedEvent) EventType() string {
+	return eventtype.PDFRegenerated.String()
+}
+
+// GetDID implements the Event interface.
+func (e PdfRegeneratedEvent) GetDID() string {
+	return e.DID
+}
+
 // CreateEvent is emitted when a new contract is created.
 type CreateEvent struct {
 	DID          string             `json:"did"`
@@ -286,6 +306,28 @@ func (e RetrieveByIDEvent) GetDID() string {
 	return e.DID
 }
 
+// RetrieveByIDDeniedEvent is emitted when a retrieve_by_id call is refused
+// because the caller is not an authorized party of the contract (party
+// read-scoping in query/contract/querybyid.go) — the denial itself is part
+// of the auditable access history.
+type RetrieveByIDDeniedEvent struct {
+	DID         string             `json:"did"`
+	HolderDID   string             `json:"holder_did"`
+	RetrievedBy string             `json:"retrieved_by"`
+	OccurredAt  time.Time          `json:"occurred_at"`
+	UserRoles   userrole.UserRoles `json:"user_roles"`
+}
+
+// EventType implements the Event interface.
+func (e RetrieveByIDDeniedEvent) EventType() string {
+	return eventtype.AccessDenied.String()
+}
+
+// GetDID implements the Event interface.
+func (e RetrieveByIDDeniedEvent) GetDID() string {
+	return e.DID
+}
+
 // RetrieveHistoryByDIDEvent is emitted when contract data is retrieved.
 type RetrieveHistoryByDIDEvent struct {
 	DID         string             `json:"did"`
@@ -375,6 +417,47 @@ func (e StoreArchivedEvent) EventType() string {
 
 // GetDID implements [event.Event].
 func (e StoreArchivedEvent) GetDID() string {
+	return e.DID
+}
+
+// DeleteArchivedEvent is emitted when an archive entry is soft-deleted
+// (DCS-FR-CSA-17: deletion requires a justification and MUST be logged with
+// timestamp and user identity).
+type DeleteArchivedEvent struct {
+	DID           string    `json:"did"`
+	DeletedBy     string    `json:"deleted_by"`
+	Justification string    `json:"justification"`
+	EntriesMarked int       `json:"entries_marked"`
+	OccurredAt    time.Time `json:"occurred_at"`
+}
+
+// EventType implements [event.Event].
+func (e DeleteArchivedEvent) EventType() string {
+	return eventtype.DeleteArchived.String()
+}
+
+// GetDID implements [event.Event].
+func (e DeleteArchivedEvent) GetDID() string {
+	return e.DID
+}
+
+// AnnotateArchivedEvent is emitted when an archive entry's summary/tags
+// annotation is set (DCS-FR-CSA-11).
+type AnnotateArchivedEvent struct {
+	DID         string    `json:"did"`
+	AnnotatedBy string    `json:"annotated_by"`
+	Summary     string    `json:"summary"`
+	Tags        []string  `json:"tags"`
+	OccurredAt  time.Time `json:"occurred_at"`
+}
+
+// EventType implements [event.Event].
+func (e AnnotateArchivedEvent) EventType() string {
+	return eventtype.AnnotateArchived.String()
+}
+
+// GetDID implements [event.Event].
+func (e AnnotateArchivedEvent) GetDID() string {
 	return e.DID
 }
 
@@ -530,6 +613,33 @@ func (e TerminateEvent) EventType() string {
 
 // GetDID implements the Event interface.
 func (e TerminateEvent) GetDID() string {
+	return e.DID
+}
+
+// RenewEvent is emitted on the newly created renewal contract when it is
+// derived from an existing (original) contract (DCS-FR-CWE-11/22,
+// DCS-FR-CSA-15). The original contract is not mutated and does not receive
+// a matching event; the link is one-directional (new -> original), recorded
+// both here and in the new contract's dcs:renewsContract JSON-LD reference.
+type RenewEvent struct {
+	DID                     string             `json:"did"`
+	HolderDID               string             `json:"holder_did"`
+	RenewedBy               string             `json:"renewed_by"`
+	OriginalDID             string             `json:"original_did"`
+	OriginalContractVersion int                `json:"original_contract_version"`
+	ContractData            *datatype.JSON     `json:"contract_data"`
+	OccurredAt              time.Time          `json:"occurred_at"`
+	UserRoles               userrole.UserRoles `json:"user_roles"`
+	Responsible             *db.Responsible    `json:"responsible,omitempty"`
+}
+
+// EventType implements the Event interface.
+func (e RenewEvent) EventType() string {
+	return eventtype.Renew.String()
+}
+
+// GetDID implements the Event interface.
+func (e RenewEvent) GetDID() string {
 	return e.DID
 }
 

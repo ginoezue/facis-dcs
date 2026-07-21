@@ -22,6 +22,7 @@ import (
 
 type RevokeCmd struct {
 	DID       string
+	SignerDID string
 	RevokedBy string
 	HolderDID string
 	UserRoles userrole.UserRoles
@@ -52,14 +53,14 @@ func (h *Revoker) Handle(ctx context.Context, cmd RevokeCmd) error {
 		return fmt.Errorf("could not read process data: %w", err)
 	}
 
-	err = h.CRepo.RevokeSignature(ctx, tx, cmd.DID, cmd.RevokedBy)
+	err = h.CRepo.RevokeSignature(ctx, tx, cmd.DID, cmd.SignerDID)
 	if err != nil {
 		return fmt.Errorf("could not revoke signature: %w", err)
 	}
 
 	// Beyond flipping the signature row's own status, revoking a signature
 	// transitions the contract's own lifecycle state to REVOKED (C2PA lifecycle
-	// banner "suspended", DCS-OR-C2PA-006 AC5). The Signed/Active -> Revoked
+	// banner "suspended", DCS-OR-C2PA-006). The Signed/Active -> Revoked
 	// edge is validated against the single-source-of-truth transition table
 	// (contractstate.Transitions), analogous to command/apply.go's
 	// APPROVED -> SIGNED transition — no hardcoded SQL state literal decides it.

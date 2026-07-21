@@ -1,39 +1,37 @@
 <script setup lang="ts">
-import type { PartialContractTemplate } from '@/models/contract-template'
-import type { Contract } from '@/models/contract/contract'
-import { ROUTES } from '@/router/router'
-import { contractWorkflowService } from '@/services/contract-workflow-service'
-import type { SemanticConditionValueSetter } from '@/modules/contract-workflow-engine/models/contract-content-values-store'
+import AddBlockModal from '@template-repository/components/builder-editor/AddBlockModal.vue'
+import BuilderPreviewDialog from '@template-repository/components/builder-editor/BuilderPreviewDialog.vue'
+import TemplatePreview from '@template-repository/components/builder-editor/preview/TemplatePreview.vue'
+import BuilderEditor from '@template-repository/components/BuilderEditor.vue'
+import ClausesEditor from '@template-repository/components/ClausesEditor.vue'
+import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
+import { storeToRefs } from 'pinia'
+import { computed, onMounted, onUnmounted, type Ref, ref, watch } from 'vue'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
+import ParticipantSelectionDialog from '@/components/ParticipantSelectionDialog.vue'
+import WorkflowStageBanner from '@/core/components/WorkflowStageBanner.vue'
+import { useScrollStore } from '@/core/store/scroll'
+import { contractStory, toBannerActions } from '@/core/workflow-story'
+import ContractDetailsEditor from '@/modules/contract-workflow-engine/components/ContractDetailsEditor.vue'
+import { useContractDataPreprocess } from '@/modules/contract-workflow-engine/composables/useContractDataPreprocess'
 import {
   useSemanticValueVerification,
   type VerificationResult,
 } from '@/modules/contract-workflow-engine/composables/useSemanticValueVerification'
-import { useContractDataPreprocess } from '@/modules/contract-workflow-engine/composables/useContractDataPreprocess'
+import { useContractContentValuesStore } from '@/modules/contract-workflow-engine/store/contractContentValuesStore'
+import { useContractEditorUiStore } from '@/modules/contract-workflow-engine/store/contractEditorUiStore'
+import { buildContractDocument } from '@/modules/template-repository/store/dcsDraftStore'
+import { useTemplateEditorUiStore } from '@/modules/template-repository/store/templateEditorUiStore'
+import ViewContractTemplateView from '@/modules/template-repository/views/ViewContractTemplateView.vue'
+import { ROUTES } from '@/router/router'
+import { contractWorkflowService } from '@/services/contract-workflow-service'
+import { useContractsStore } from '@/stores/contracts-store'
 import { useErrorStore } from '@/stores/error-store'
 import { ContractState } from '@/types/contract-state'
-import ContractDetailsEditor from '@/modules/contract-workflow-engine/components/ContractDetailsEditor.vue'
-import { useContractEditorUiStore } from '@/modules/contract-workflow-engine/store/contractEditorUiStore'
-import { useContractContentValuesStore } from '@/modules/contract-workflow-engine/store/contractContentValuesStore'
-import TemplatePreview from '@template-repository/components/builder-editor/preview/TemplatePreview.vue'
-import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
-import { storeToRefs } from 'pinia'
-import { computed, onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
-import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
+import type { Contract } from '@/models/contract/contract'
 import type { ContractData } from '@/models/contract-data'
-import { useTemplateEditorUiStore } from '@/modules/template-repository/store/templateEditorUiStore'
-import BuilderEditor from '@template-repository/components/BuilderEditor.vue'
-import AddBlockModal from '@template-repository/components/builder-editor/AddBlockModal.vue'
-import SemanticRulesEditor from '@template-repository/components/SemanticRulesEditor.vue'
-import ClausesEditor from '@template-repository/components/ClausesEditor.vue'
-import BuilderPreviewDialog from '@template-repository/components/builder-editor/BuilderPreviewDialog.vue'
-import ViewContractTemplateView from '@/modules/template-repository/views/ViewContractTemplateView.vue'
-import { useScrollStore } from '@/core/store/scroll'
-import {
-  buildContractDocument,
-  getSemanticConditionsFromTemplateData,
-} from '@/modules/template-repository/store/dcsDraftStore'
-import { useContractsStore } from '@/stores/contracts-store'
-import ParticipantSelectionDialog from '@/components/ParticipantSelectionDialog.vue'
+import type { PartialContractTemplate } from '@/models/contract-template'
+import type { SemanticConditionValueSetter } from '@/modules/contract-workflow-engine/models/contract-content-values-store'
 import type { ParticipantSelection } from '@/utils/participant-selection'
 
 const route = useRoute()
@@ -78,20 +76,22 @@ const setSemanticConditionValue = computed<SemanticConditionValueSetter>(() => {
 
 const tabs = computed(() => contractEditorUiStore.availableTabs(contract.value?.state ?? ContractState.draft))
 
+const story = computed(() => contractStory(contract.value?.state))
+
 function buildCurrentContractData(): ContractData | undefined {
   if (!contract.value) return undefined
   return buildContractDocument({
-    documentId: contract.value.did,
+    documentId:
+      ((contract.value.contract_data as Record<string, unknown> | undefined)?.['@id'] as string | undefined) ??
+      contract.value.did,
     name: contract.value.name,
     description: contract.value.description,
     blocks: dcsDraftStore.blocks,
     layout: dcsDraftStore.layout,
     contractData: dcsDraftStore.contractData,
     policies: dcsDraftStore.policies,
-    subTemplateSnapshots: dcsDraftStore.subTemplateSnapshots,
     semanticConditionValues: contractContentValuesStore.semanticConditionValues,
     parentContractDid: selectedParentContractDid.value ?? undefined,
-    sourceTemplate: contract.value.contract_data?.sourceTemplate,
     derivedFromTemplate: contract.value.contract_data?.derivedFromTemplate,
   })
 }
@@ -123,15 +123,8 @@ async function saveContractDraftForSubmit(): Promise<Contract> {
 }
 
 function verifySemanticValues(): boolean {
-  const subTemplateSemanticConditions = dcsDraftStore.subTemplateSnapshots.map((subTemplate) => ({
-    templateId: subTemplate.did,
-    version: subTemplate.version,
-    document_number: subTemplate.document_number,
-    semanticConditions: getSemanticConditionsFromTemplateData(subTemplate.template_data),
-  }))
   const result = verifySemanticValue(
     dcsDraftStore.semanticConditions,
-    subTemplateSemanticConditions,
     contractContentValuesStore.semanticConditionValues,
     dcsDraftStore.blocks,
   )
@@ -144,15 +137,13 @@ function verifySemanticValues(): boolean {
   return false
 }
 
-const createContract = async ({ reviewers, approvers, negotiators }: ParticipantSelection) => {
+const createContract = async ({ counterparty }: ParticipantSelection) => {
   isSubmitting.value = true
   try {
     if (selectedTemplate.value) {
       const response = await contractWorkflowService.create({
         template_did: selectedTemplate.value.did,
-        reviewers,
-        approvers,
-        negotiators,
+        counterparty,
       })
       did.value = response.did
       if (selectedParentContractDid.value) {
@@ -201,7 +192,7 @@ const updateContract = async () => {
   }
 }
 
-const submitContract = async ({ reviewers, approvers, negotiators }: ParticipantSelection) => {
+const submitContract = async () => {
   if (!contract.value || !verifySemanticValues()) return
   isSubmitting.value = true
   try {
@@ -209,9 +200,6 @@ const submitContract = async ({ reviewers, approvers, negotiators }: Participant
     const response = await contractWorkflowService.submit({
       did: updatedContract.did,
       updated_at: updatedContract.updated_at,
-      reviewers,
-      approvers,
-      negotiators,
     })
     if (response.did) {
       await router.push({ name: ROUTES.CONTRACTS.LIST })
@@ -274,7 +262,7 @@ onMounted(async () => {
 })
 
 watch(
-  () => [dcsDraftStore.blocks, dcsDraftStore.semanticConditions, dcsDraftStore.subTemplateSnapshots],
+  () => [dcsDraftStore.blocks, dcsDraftStore.semanticConditions],
   () => {
     const invalidValues = contractContentValuesStore.semanticConditionValues.filter(
       (conditionValue) =>
@@ -282,7 +270,6 @@ watch(
           conditionValue,
           dcsDraftStore.blocks,
           dcsDraftStore.semanticConditions,
-          dcsDraftStore.subTemplateSnapshots,
         ),
     )
     contractContentValuesStore.removeSemanticConditionValues(invalidValues)
@@ -314,11 +301,11 @@ function applyContractDataToDraft(contractData?: unknown) {
   if (cd) {
     dcsDraftStore.reset({
       workflow: 'contract',
+      documentIri: ((contractData as Record<string, unknown>)['@id'] as string | undefined) ?? null,
       blocks: cd.blocks,
       layout: cd.layout,
       contractData: cd.contractData,
       policies: cd.policies,
-      subTemplateSnapshots: cd.subTemplateSnapshots,
     })
     contractContentValuesStore.reset({ semanticConditionValues: cd.semanticConditionValues ?? [] })
   } else {
@@ -408,6 +395,13 @@ onBeforeRouteLeave(() => {
         <div class="mt-5 grow">
           <div class="mx-auto max-w-4xl p-6">
             <div class="grid grid-cols-1 gap-4">
+              <WorkflowStageBanner
+                :steps="story.steps"
+                :current-key="story.currentKey"
+                :headline="story.headline"
+                :narrative="story.narrative"
+                :actions="toBannerActions(story.actionHints)"
+              />
               <div v-show="activeTab === 'details'">
                 <ContractDetailsEditor :contract="contract" />
               </div>
@@ -421,22 +415,12 @@ onBeforeRouteLeave(() => {
                         :semantic-conditions="dcsDraftStore.semanticConditions"
                         :semantic-condition-values="contractContentValuesStore.semanticConditionValues"
                         :verification-result="verificationResult"
-                        :sub-template-snapshots="dcsDraftStore.subTemplateSnapshots"
                         :set-semantic-condition-value="setSemanticConditionValue"
                       />
                     </div>
                   </div>
                 </div>
               </div>
-              <!-- SEMANTIC RULES TAB -->
-              <div v-show="activeTab === 'semantic'">
-                <div class="card border border-base-300 bg-base-100 shadow-sm">
-                  <div class="card-body gap-5">
-                    <SemanticRulesEditor />
-                  </div>
-                </div>
-              </div>
-
               <!-- CLAUSES TAB -->
               <div v-show="activeTab === 'clauses'">
                 <div class="card border border-base-300 bg-base-100 shadow-sm">
@@ -489,12 +473,15 @@ onBeforeRouteLeave(() => {
           <span v-if="isSubmitting" class="loading loading-sm loading-spinner"></span>
           Update
         </button>
-        <ParticipantSelectionDialog
+        <button
           v-if="contract?.state === ContractState.draft && canSubmitContract"
           class="btn flex-1 btn-primary"
           :disabled="isSubmitting"
-          @submit="submitContract"
-        />
+          @click="submitContract"
+        >
+          <span v-if="isSubmitting" class="loading loading-sm loading-spinner"></span>
+          Submit
+        </button>
         <button
           v-else-if="contract?.state === ContractState.rejected && canSubmitContract"
           class="btn flex-1 btn-primary"

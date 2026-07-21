@@ -1,16 +1,18 @@
 <script setup lang="ts">
+import { storeToRefs } from 'pinia'
+import { computed, onMounted, onUnmounted, type Ref, ref, watch } from 'vue'
 import Pagination from '@/components/Pagination.vue'
-import type { Contract } from '@/models/contract/contract'
+import { useContractPermissions } from '@/modules/contract-workflow-engine/composables/useContractPermissions'
+import { ROUTES } from '@/router/router'
 import { useContractsStore } from '@/stores/contracts-store.ts'
 import { useContractStateFilterStore } from '@/stores/state-filter-store'
 import { contractStates } from '@/types/contract-state'
 import { compareValues } from '@/utils/comparison'
-import { storeToRefs } from 'pinia'
-import { computed, onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
-import ListSort from '../ListSort.vue'
-import ListStateFilter from '../ListStateFilter.vue'
 import ContractListItem from './ContractListItem.vue'
 import ContractListSearch from './ContractListSearch.vue'
+import ListSort from '../ListSort.vue'
+import ListStateFilter from '../ListStateFilter.vue'
+import type { Contract } from '@/models/contract/contract'
 
 const contractsStore = useContractsStore()
 const { loading, error } = storeToRefs(contractsStore)
@@ -18,7 +20,7 @@ const { loading, error } = storeToRefs(contractsStore)
 const contracts: Ref<Contract[]> = ref([])
 
 const pageLimits = ref([25, 50, 100])
-const limit = computed(() => pageLimits.value[0] ?? 25)
+const limit = ref(pageLimits.value[0] ?? 25)
 const currentPage = ref(1)
 const hasNextPage = ref(true)
 
@@ -69,6 +71,12 @@ const sortedContracts = computed(() => {
 
 const hasContracts = computed(() => contracts.value.length > 0)
 
+const { isCreator } = useContractPermissions()
+
+const isRepositoryEmpty = computed(
+  () => !hasContracts.value && searchResults.value === null && !stateFilterStore.hasFilters && currentPage.value === 1,
+)
+
 const filteredContracts = computed(() => {
   if (stateFilterStore.hasFilters) {
     return sortedContracts.value.filter((contract) => stateFilterStore.hasFilter(contract.state))
@@ -100,6 +108,16 @@ onUnmounted(() => stateFilterStore.reset())
         :contract="contract"
       />
     </template>
+    <li v-else-if="isRepositoryEmpty" class="flex flex-col items-start gap-2 px-4 py-8">
+      <p class="font-semibold">No contracts yet.</p>
+      <p class="max-w-prose text-sm text-base-content/70">
+        Contracts are created from templates that are approved and registered in the Template Catalogue, then move
+        through negotiation, review, approval and signing. Start by creating one from a registered template.
+      </p>
+      <RouterLink v-if="isCreator" :to="{ name: ROUTES.CONTRACTS.NEW }" class="btn mt-1 btn-sm btn-primary">
+        New Contract
+      </RouterLink>
+    </li>
     <li v-else class="px-4">No contracts found.</li>
   </ul>
   <div class="grid w-full grid-cols-3 items-center px-4 pb-4">

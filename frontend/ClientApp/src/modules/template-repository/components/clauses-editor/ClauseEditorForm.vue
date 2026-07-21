@@ -1,22 +1,18 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import type { SemanticCondition } from '@/modules/template-repository/models/contract-template'
 import RequiredIndicator from '@core/components/RequiredIndicator.vue'
 import ClauseTextEditor from '@template-repository/components/clauses-editor/ClauseTextEditor.vue'
 import {
   conditionIdsInContent,
   usedPlaceholderKeysInContent,
 } from '@template-repository/composables/useClauseTextChips'
+import { computed, ref, watch } from 'vue'
 import type { DcsContentSegment } from '@/models/dcs-jsonld'
-import { stringToContent } from '@template-repository/composables/useClauseTextChips'
+import type { SemanticCondition } from '@/modules/template-repository/models/contract-template'
 
 const props = defineProps<{
   mode: 'create' | 'edit'
   initialTitle: string
-  /** Initial content as DcsContentSegment[] or a plain string (converted on mount). */
   initialContent?: DcsContentSegment[]
-  /** Legacy plain-text init — converted to DcsContentSegment[] via stringToContent. */
-  initialText?: string
   semanticConditions: SemanticCondition[]
   sourceRequirementName?: string
   showCancel?: boolean
@@ -28,9 +24,7 @@ const emit = defineEmits<{
 }>()
 
 const localTitle = ref(props.initialTitle)
-const localContent = ref<DcsContentSegment[]>(
-  props.initialContent ?? stringToContent(props.initialText ?? '', props.semanticConditions),
-)
+const localContent = ref<DcsContentSegment[]>(props.initialContent ?? [])
 
 const heading = computed(() => {
   if (props.mode === 'edit') return 'Edit clause'
@@ -38,10 +32,10 @@ const heading = computed(() => {
 })
 
 watch(
-  () => [props.initialTitle, props.initialContent, props.initialText] as const,
-  ([title, content, text]) => {
+  () => [props.initialTitle, props.initialContent] as const,
+  ([title, content]) => {
     localTitle.value = title
-    localContent.value = content ?? stringToContent(text ?? '', props.semanticConditions)
+    localContent.value = content ?? []
   },
 )
 

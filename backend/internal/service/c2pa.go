@@ -10,7 +10,6 @@ import (
 	c2paservice "digital-contracting-service/gen/c2_pa_service"
 	"digital-contracting-service/internal/base/ipfs"
 	cwedb "digital-contracting-service/internal/contractworkflowengine/db"
-	"digital-contracting-service/internal/pdfgeneration/manifest"
 	"digital-contracting-service/internal/pdfgeneration/pdfcore"
 	"digital-contracting-service/internal/pdfgeneration/provenance"
 	pdfquery "digital-contracting-service/internal/pdfgeneration/query"
@@ -31,7 +30,7 @@ type c2paSrvc struct {
 }
 
 // NewC2PAService wires the public C2PA manifest endpoint (DCS-OR-C2PA-008,
-// Workstream D). It reuses the same PDF export dependencies as PDFGeneration so
+// DCS-OR-C2PA-008). It reuses the same PDF export dependencies as PDFGeneration so
 // it can fetch the current/cached signed PDF and extract its embedded C2PA
 // manifest store.
 func NewC2PAService(
@@ -86,18 +85,10 @@ func (s *c2paSrvc) GetManifest(ctx context.Context, p *c2paservice.GetManifestPa
 		return nil, nil, c2paservice.MakeInternalError(fmt.Errorf("read exported PDF for %s: %w", p.ContractDid, err))
 	}
 
-	manifestBytes, err := s.PDFCore.ExtractManifest(ctx, pdfBytes)
-	if err != nil {
-		return nil, nil, c2paservice.MakeInternalError(fmt.Errorf("extract C2PA manifest for %s: %w", p.ContractDid, err))
-	}
-	if len(manifestBytes) == 0 {
-		return nil, nil, c2paservice.MakeNotFound(fmt.Errorf("no C2PA manifest embedded in PDF for contract %s", p.ContractDid))
-	}
-
 	if p.History != nil && *p.History {
-		chain, err := manifest.ParseChain(manifestBytes)
+		chain, err := s.PDFCore.ExtractManifestChain(ctx, pdfBytes)
 		if err != nil {
-			return nil, nil, c2paservice.MakeInternalError(fmt.Errorf("parse C2PA manifest chain for %s: %w", p.ContractDid, err))
+			return nil, nil, c2paservice.MakeInternalError(fmt.Errorf("C2PA manifest chain for %s: %w", p.ContractDid, err))
 		}
 		body, err := json.Marshal(chain)
 		if err != nil {
@@ -105,6 +96,14 @@ func (s *c2paSrvc) GetManifest(ctx context.Context, p *c2paservice.GetManifestPa
 		}
 		ct := "application/json"
 		return &c2paservice.GetManifestResult{ContentType: &ct}, io.NopCloser(bytes.NewReader(body)), nil
+	}
+
+	manifestBytes, err := s.PDFCore.ExtractManifest(ctx, pdfBytes)
+	if err != nil {
+		return nil, nil, c2paservice.MakeInternalError(fmt.Errorf("extract C2PA manifest for %s: %w", p.ContractDid, err))
+	}
+	if len(manifestBytes) == 0 {
+		return nil, nil, c2paservice.MakeNotFound(fmt.Errorf("no C2PA manifest embedded in PDF for contract %s", p.ContractDid))
 	}
 
 	ct := c2paManifestMediaType

@@ -1,0 +1,160 @@
+@prefix dcs: <https://w3id.org/facis/dcs/ontology/v1#> .
+@prefix dcst: <https://w3id.org/facis/dcs/taxonomy/v1#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# A deliberately small default domain-field catalog: enough dcs:DomainField
+# properties to build and validate a basic SLA contract out of the box. It is
+# just the seeded starting point — the builder discovers whatever ontologies
+# and shapes are registered in the Semantic Hub, so real deployments register
+# their own vocabulary (Gaia-X, an industry profile) and this stays minimal.
+
+<https://w3id.org/facis/sla/ontology> a owl:Ontology ;
+  rdfs:label "FACIS SLA Domain Fields"@en ;
+  rdfs:comment "A minimal domain-field catalog for SLA contracting; register richer vocabularies in the Semantic Hub."@en ;
+  rdfs:seeAlso <https://w3id.org/facis/dcs/ontology/v1> .
+
+# ---- Entity classes a field's rdfs:domain names ----
+
+dcs:CompanyParty a rdfs:Class ;
+  rdfs:label "Company Party"@en ;
+  rdfs:comment "A company acting as a contract party; its dcs:role names its function in the contract."@en .
+
+dcs:PaymentTerm a rdfs:Class ; rdfs:label "Payment Term"@en .
+dcs:LegalTerms a rdfs:Class ; rdfs:label "Legal Terms"@en .
+dcs:SLO a rdfs:Class ; rdfs:label "Service Level Objective"@en .
+dcs:SignatureRequirement a rdfs:Class ; rdfs:label "Signature Requirement"@en .
+
+dcs:DomainField a owl:Class ;
+  rdfs:subClassOf rdf:Property ;
+  rdfs:label "Domain Field"@en ;
+  skos:definition "A contract-data field templates bind placeholders and ODRL constraints to; its IRI is its identity."@en .
+
+dcs:ContractPartyRoleCode a rdfs:Class ;
+  rdfs:subClassOf dcs:VocabularyTerm ;
+  rdfs:label "Contract Party Role Code"@en .
+
+# ---- Document-level party + its contract role (drives entity roles) ----
+
+dcs:party a rdf:Property ;
+  rdfs:label "Company Party"@en ;
+  dcs:documentProperty "parties" ;
+  rdfs:range dcs:CompanyParty .
+
+dcs:role a rdf:Property ;
+  rdfs:label "Role"@en ;
+  rdfs:range dcs:ContractPartyRoleCode ;
+  dcs:hasValueConstraint dcst:constraint-contract-party-role .
+
+# ---- Value constraints + taxonomies ----
+
+dcst:constraint-iso3166-alpha3-country a dcs:ValueConstraint ;
+  dcs:valueType dcs:CountryReference ;
+  dcs:format "iso-3166-1-alpha-3" ;
+  dcs:pattern "^[A-Z]{3}$" ;
+  dcs:allowedValuesRef "ISO 3166-1 alpha-3" ;
+  dcs:valueCatalog dcst:catalog-iso3166-alpha3-country ;
+  dcs:allowedValue "DEU", "AUT", "CHE", "USA" ;
+  rdfs:label "ISO 3166-1 alpha-3 Country Constraint"@en .
+
+dcst:constraint-iso4217-currency a dcs:ValueConstraint ;
+  dcs:valueType dcs:CurrencyReference ;
+  dcs:format "iso-4217" ;
+  dcs:pattern "^[A-Z]{3}$" ;
+  dcs:allowedValuesRef "ISO 4217" ;
+  dcs:valueCatalog dcst:catalog-iso4217-currency ;
+  dcs:allowedValue "EUR", "USD" ;
+  rdfs:label "ISO 4217 Currency Constraint"@en .
+
+dcst:constraint-governing-law a dcs:ValueConstraint ;
+  dcs:format "controlled-vocabulary" ;
+  dcs:allowedValue "DE", "AT", "CH", "EU" ;
+  rdfs:label "Governing Law Vocabulary Constraint"@en .
+
+dcst:constraint-eidas-signature-level a dcs:ValueConstraint ;
+  dcs:format "eidas-signature-level" ;
+  dcs:allowedValue "SES", "AES", "QES" ;
+  rdfs:label "eIDAS Signature Level Constraint"@en .
+
+dcst:constraint-sla-availability-percent a dcs:ValueConstraint ;
+  dcs:minInclusive 0 ;
+  dcs:maxInclusive 100 ;
+  dcs:format "percentage" ;
+  rdfs:label "SLA Availability Percentage Constraint"@en .
+
+dcst:constraint-contract-party-role a dcs:ValueConstraint ;
+  dcs:format "controlled-vocabulary" ;
+  dcs:allowedValue "supplier", "customer", "provider", "client" ;
+  rdfs:label "Contract Party Role Vocabulary Constraint"@en .
+
+dcst:country-DEU a skos:Concept ;
+  skos:inScheme dcst:catalog-iso3166-alpha3-country ; skos:notation "DEU" ; skos:prefLabel "Germany"@en .
+dcst:country-AUT a skos:Concept ;
+  skos:inScheme dcst:catalog-iso3166-alpha3-country ; skos:notation "AUT" ; skos:prefLabel "Austria"@en .
+dcst:country-CHE a skos:Concept ;
+  skos:inScheme dcst:catalog-iso3166-alpha3-country ; skos:notation "CHE" ; skos:prefLabel "Switzerland"@en .
+dcst:country-USA a skos:Concept ;
+  skos:inScheme dcst:catalog-iso3166-alpha3-country ; skos:notation "USA" ; skos:prefLabel "United States"@en .
+
+dcst:currency-EUR a skos:Concept ;
+  skos:inScheme dcst:catalog-iso4217-currency ; skos:notation "EUR" ; skos:prefLabel "Euro"@en ; dcs:valueSymbol "€" .
+dcst:currency-USD a skos:Concept ;
+  skos:inScheme dcst:catalog-iso4217-currency ; skos:notation "USD" ; skos:prefLabel "US Dollar"@en ; dcs:valueSymbol "$" .
+
+# ---- Domain fields ----
+
+dcst:field-company-legalName a dcs:DomainField, owl:DatatypeProperty ;
+  rdfs:label "Company Legal Name"@en ;
+  rdfs:domain dcs:CompanyParty ;
+  rdfs:range xsd:string .
+
+dcst:field-company-location-country a dcs:DomainField, owl:DatatypeProperty ;
+  rdfs:label "Company Country"@en ;
+  rdfs:domain dcs:CompanyParty ;
+  rdfs:range xsd:string ;
+  dcs:hasValueConstraint dcst:constraint-iso3166-alpha3-country .
+
+dcst:field-company-location-postalCode a dcs:DomainField, owl:DatatypeProperty ;
+  rdfs:label "Company Postal Code"@en ;
+  rdfs:domain dcs:CompanyParty ;
+  rdfs:range xsd:string .
+
+dcst:field-contract-governingLaw a dcs:DomainField, owl:DatatypeProperty ;
+  rdfs:label "Governing Law"@en ;
+  rdfs:domain dcs:LegalTerms ;
+  rdfs:range xsd:string ;
+  dcs:hasValueConstraint dcst:constraint-governing-law .
+
+dcst:field-contract-validity-endDate a dcs:DomainField, owl:DatatypeProperty ;
+  rdfs:label "Validity End Date"@en ;
+  rdfs:range xsd:date .
+
+dcst:field-contract-payment-amount a dcs:DomainField, owl:DatatypeProperty ;
+  rdfs:label "Payment Amount"@en ;
+  rdfs:domain dcs:PaymentTerm ;
+  rdfs:range xsd:decimal .
+
+dcst:field-contract-payment-currency a dcs:DomainField, owl:DatatypeProperty ;
+  rdfs:label "Payment Currency"@en ;
+  rdfs:domain dcs:PaymentTerm ;
+  rdfs:range xsd:string ;
+  dcs:hasValueConstraint dcst:constraint-iso4217-currency .
+
+dcst:field-service-description a dcs:DomainField, owl:DatatypeProperty ;
+  rdfs:label "Service Description"@en ;
+  rdfs:range xsd:string .
+
+dcst:field-service-sla-availability a dcs:DomainField, owl:DatatypeProperty ;
+  rdfs:label "SLA Availability"@en ;
+  rdfs:domain dcs:SLO ;
+  rdfs:range xsd:decimal ;
+  dcs:hasValueConstraint dcst:constraint-sla-availability-percent .
+
+dcst:field-signature-requiredLevel a dcs:DomainField, owl:DatatypeProperty ;
+  rdfs:label "Required Signature Level"@en ;
+  rdfs:domain dcs:SignatureRequirement ;
+  rdfs:range xsd:string ;
+  dcs:hasValueConstraint dcst:constraint-eidas-signature-level .

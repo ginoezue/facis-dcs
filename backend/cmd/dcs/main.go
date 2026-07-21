@@ -13,12 +13,11 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	dcstodcs2 "digital-contracting-service/internal/dcstodcs"
 	dcstodcsdb "digital-contracting-service/internal/dcstodcs/db"
 	pq2 "digital-contracting-service/internal/dcstodcs/db/pg"
-
-	"digital-contracting-service/internal/signingmanagement/signer"
 
 	didservice "digital-contracting-service/gen/did_service"
 
@@ -27,9 +26,9 @@ import (
 	contractstoragearchive "digital-contracting-service/gen/contract_storage_archive"
 	contractworkflowengine "digital-contracting-service/gen/contract_workflow_engine"
 	dcstodcs "digital-contracting-service/gen/dcs_to_dcs"
-	internalsigning "digital-contracting-service/gen/internal_signing"
 	pdfgeneration "digital-contracting-service/gen/pdf_generation"
 	processauditandcompliance "digital-contracting-service/gen/process_audit_and_compliance"
+	semantichubgen "digital-contracting-service/gen/semantic_hub"
 	signaturemanagement "digital-contracting-service/gen/signature_management"
 	templatecatalogueintegration "digital-contracting-service/gen/template_catalogue_integration"
 	templaterepository "digital-contracting-service/gen/template_repository"
@@ -44,6 +43,7 @@ import (
 	"digital-contracting-service/internal/base/identity"
 	"digital-contracting-service/internal/base/ipfs"
 	"digital-contracting-service/internal/base/tsa"
+	"digital-contracting-service/internal/base/validation"
 	contractworkflowengine2 "digital-contracting-service/internal/contractworkflowengine"
 	cwecommand "digital-contracting-service/internal/contractworkflowengine/command"
 	cwerepo "digital-contracting-service/internal/contractworkflowengine/db/pg"
@@ -52,6 +52,7 @@ import (
 	pdfevent "digital-contracting-service/internal/pdfgeneration/event"
 	"digital-contracting-service/internal/pdfgeneration/pdfcore"
 	"digital-contracting-service/internal/pdfgeneration/provenance"
+	"digital-contracting-service/internal/semantichub"
 	"digital-contracting-service/internal/service"
 	smrepo "digital-contracting-service/internal/signingmanagement/db/pg"
 	fcclient "digital-contracting-service/internal/templatecatalogueintegration/client"
@@ -138,6 +139,26 @@ func main() {
 		log.Fatalf(ctx, err, "Could not run database migrations")
 		os.Exit(1)
 	}
+
+	// DCS_PUBLIC_URL is the base of every absolute IRI a produced document
+	// carries (@context, sh:shapesGraph, dcterms:conformsTo anchors, C2PA
+	// remote manifests) — these must dereference for external consumers.
+	if strings.TrimSpace(os.Getenv("DCS_PUBLIC_URL")) == "" {
+		log.Fatalf(ctx, errors.New("dcs configuration missing"), "DCS_PUBLIC_URL must be set: produced documents carry absolute, resolvable IRIs based on it")
+	}
+
+	// Seed the Semantic Hub genesis schemas (JSON-LD context, SHACL shapes,
+	// validation profile) and anchor document production to the active
+	// versions. The SemanticHub service re-runs the anchor refresh after
+	// every activation/rollback.
+	if err := semantichub.Seed(ctx, db); err != nil {
+		log.Fatalf(ctx, err, "Could not seed the Semantic Hub genesis schemas")
+	}
+	if err := service.RefreshValidationAnchors(ctx, db); err != nil {
+		log.Fatalf(ctx, err, "Could not anchor validation to the Semantic Hub's active schemas")
+	}
+
+	validation.SetShapeSource(semantichub.HubShapeSource{DB: db})
 
 	// Open the PKCS#11 token that holds every private key (DCS-IR-HI-01). A
 	// wrong module path/token/PIN is fatal: there is no software fallback.
@@ -307,11 +328,8 @@ func main() {
 	dcsToDcsSynchronizer := dcstodcs2.DCSToDCSSynchronizer{
 		DB:          db,
 		CRepo:       &cweRepo,
-		NRepo:       cweNRepo,
-		NTRepo:      &cweNTRepo,
-		RTRepo:      &cweRTRepo,
-		ATRepo:      &cweATRepo,
 		SRepo:       &syncRepo,
+		IPFSClient:  ipfsAPIClient,
 		DIDDocument: *didDocument,
 	}
 	dcsToDcsSynchronizer.StartSynchronizerJob(ctx, cepSubClient)
@@ -328,10 +346,10 @@ func main() {
 	archiveNotaryURL := strings.TrimSpace(os.Getenv("ORCE_ARCHIVE_NOTARY_URL"))
 	var archiveNotaryClient cwecommand.ArchiveNotary
 	if archiveNotaryURL != "" {
-		archiveNotaryClient = cwecommand.NewHTTPArchiveNotaryClient(archiveNotaryURL)
+		archiveNotaryClient = cwecommand.NewHTTPArchiveNotaryClient(archiveNotaryURL, os.Getenv("ORCE_ARCHIVE_AUDIT_LOG_BEARER_TOKEN"))
 	}
 
-	// Contract deployment (Workstream G, UC-05-01): the Contract Target
+	// Contract deployment (UC-05-01): the Contract Target
 	// System client is optional — without CONTRACT_TARGET_URL set, deploy
 	// dispatches are still recorded (correlation ID, content hash, archive
 	// evidence) but no outbound call is made; the target's own callback
@@ -411,18 +429,11 @@ func main() {
 	vcSigner := provenance.NewHSMVCSigner(vcHSMSigner, vcKeyLabel)
 
 	// Sign COSE Sig_structure bytes for pdf-core's C2PA manifests with the HSM
-	// C2PA key, exposed via the authenticated InternalSigning endpoint.
+	// C2PA key. pdf-core prepares the Sig_structures; the DCS signs them in-process
+	// via the pdf-core client and posts them back for embedding (pdf-core is keyless).
 	c2paSigner, err := hsmClient.Signer(hsm.KeyLabelC2PA())
 	if err != nil {
 		log.Fatalf(ctx, err, "Could not load HSM C2PA signing key")
-	}
-
-	// Sign CMS SignedAttributes digests for pdf-core's PAdES contract
-	// signatures with the HSM PAdES key, exposed via the authenticated
-	// InternalSigning endpoint (DCS-IR-SI-10).
-	padesSigner, err := hsmClient.Signer(hsm.KeyLabelPADES())
-	if err != nil {
-		log.Fatalf(ctx, err, "Could not load HSM PAdES signing key")
 	}
 
 	// Initialize OCM-W Status List Service client (DCS-OR-C2PA-005).
@@ -430,7 +441,9 @@ func main() {
 	if statusListServiceURL == "" {
 		log.Fatalf(ctx, nil, "STATUSLIST_SERVICE_URL is required (DCS-OR-C2PA-005)")
 	}
-	if err := probeHTTPAny(statusListServiceURL+"/health", statusListServiceURL+"/v1/metrics/health"); err != nil {
+	if err := probeHTTPUntilReady(3*time.Minute, func() error {
+		return probeHTTPAny(statusListServiceURL+"/health", statusListServiceURL+"/v1/metrics/health")
+	}); err != nil {
 		log.Fatalf(ctx, err, "status list service not reachable at %s", statusListServiceURL)
 	}
 	statusListTenantID := os.Getenv("STATUSLIST_TENANT_ID") // defaults to "default" when empty
@@ -441,10 +454,14 @@ func main() {
 	if pdfCoreURL == "" {
 		log.Fatalf(ctx, nil, "PDF_CORE_URL is required")
 	}
-	if err := probeHTTP(pdfCoreURL + "/version"); err != nil {
+	if err := probeHTTPUntilReady(3*time.Minute, func() error {
+		return probeHTTP(pdfCoreURL + "/version")
+	}); err != nil {
 		log.Fatalf(ctx, err, "pdf-core not reachable at %s", pdfCoreURL)
 	}
-	pdfCoreClient := pdfcore.New(pdfCoreURL)
+	pdfCoreClient := pdfcore.New(pdfCoreURL, func(sigStructure []byte) ([]byte, error) {
+		return hsm.SignES256(c2paSigner, sigStructure)
+	})
 
 	smCRepo := smrepo.PostgresContractRepo{
 		IPFSClient: ipfsAPIClient,
@@ -469,7 +486,7 @@ func main() {
 		templateRepositorySvc           templaterepository.Service
 		didSrv                          didservice.Service
 		c2paSvc                         c2paservice.Service
-		internalSigningSvc              internalsigning.Service
+		semanticHubSvc                  semantichubgen.Service
 	)
 	{
 		presentationRepo := pg.NewPostgresPresentationAttemptRepo(db)
@@ -478,17 +495,17 @@ func main() {
 			log.Fatalf(ctx, err, "auth service init failed")
 		}
 
-		contractStorageArchiveSvc = service.NewContractStorageArchive(db, jwtAuth, &cweRepo, *didDocument)
+		contractStorageArchiveSvc = service.NewContractStorageArchive(db, jwtAuth, &cweRepo, *didDocument, auditTrailReader)
 		contractWorkflowEngineSvc = service.NewContractWorkflowEngine(db, jwtAuth, &cweRepo, &cweRTRepo, &cweATRepo, &cweNTRepo, &cweNRepo, &cweCTRepo, &syncRepo, euTrustPool, templateCatalogueClient, auditTrailReader, *didDocument, ipfsAPIClient, archiveNotaryClient, tsaClient, cweDeploymentRepo, contractTargetClient)
-		dcsToDcsSvc = service.NewDcsToDcs(db, jwtAuth, &cweRepo, &cweRTRepo, &cweATRepo, &cweNTRepo, &cweNRepo, &cweCTRepo, &syncRepo, euTrustPool, *didDocument, ipfsAPIClient)
-		pdfGenerationSvc = service.NewPDFGeneration(db, jwtAuth, ipfsAPIClient, &cweRepo, &ctRepo, &smCRepo, pdfCoreClient, issuerDID, provenance.NewLocalVCIssuer(vcSigner, issuerDID, statusListPublisher))
+		dcsToDcsSvc = service.NewDcsToDcs(db, jwtAuth, &cweRepo, &cweRTRepo, &cweATRepo, &cweNTRepo, &cweNRepo, &cweCTRepo, &syncRepo, euTrustPool, *didDocument, ipfsAPIClient, pdfCoreClient)
+		pdfGenerationSvc = service.NewPDFGeneration(db, jwtAuth, ipfsAPIClient, &cweRepo, &ctRepo, &smCRepo, pdfCoreClient, issuerDID, provenance.NewLocalVCIssuer(vcSigner, issuerDID, statusListPublisher), did)
 		c2paSvc = service.NewC2PAService(db, ipfsAPIClient, &cweRepo, pdfCoreClient, issuerDID, provenance.NewLocalVCIssuer(vcSigner, issuerDID, statusListPublisher))
-		processAuditAndComplianceSvc = service.NewProcessAuditAndCompliance(db, jwtAuth, auditTrailReader, &ctRepo, &cweRepo)
-		signatureManagementSvc = service.NewSignatureManagement(db, jwtAuth, &smCRepo, &smrepo.PostgresCeremonyRepo{}, auditTrailReader, signer.NewPDFCoreSigner(pdfCoreClient), vcSigner, issuerDID, ipfsAPIClient, pdfCoreClient, &cweRepo, archiveNotaryClient, tsaClient, provenance.NewLocalVCIssuer(vcSigner, issuerDID, statusListPublisher))
+		processAuditAndComplianceSvc = service.NewProcessAuditAndCompliance(db, jwtAuth, auditTrailReader, &ctRepo, &cweRepo, &cweATRepo)
+		signatureManagementSvc = service.NewSignatureManagement(db, jwtAuth, &smCRepo, &smrepo.PostgresCeremonyRepo{}, auditTrailReader, vcSigner, issuerDID, ipfsAPIClient, pdfCoreClient, &cweRepo, archiveNotaryClient, tsaClient, provenance.NewLocalVCIssuer(vcSigner, issuerDID, statusListPublisher), requestSigner, authCfg.Hydra.ClientID(), authCfg.PublicAPIBase)
 		templateCatalogueIntegrationSvc = service.NewTemplateCatalogueIntegration(db, jwtAuth, templateCatalogueClient)
-		templateRepositorySvc = service.NewTemplateRepository(db, jwtAuth, &ctRepo, &ctRTRepo, &ctATRepo, templateCatalogueClient, auditTrailReader)
+		templateRepositorySvc = service.NewTemplateRepository(db, jwtAuth, &ctRepo, &ctRTRepo, &ctATRepo, templateCatalogueClient, auditTrailReader, vcSigner, issuerDID)
 		didSrv = didService
-		internalSigningSvc = service.NewInternalSigning(jwtAuth, c2paSigner, padesSigner)
+		semanticHubSvc = service.NewSemanticHub(db, jwtAuth)
 	}
 
 	// Channel used by background workers and signal handler to notify main to exit.
@@ -514,6 +531,7 @@ func main() {
 		TRepo:      &ctRepo,
 		PDFCore:    pdfCoreClient,
 		IssuerDID:  issuerDID,
+		LocalPeer:  did,
 		VCIssuer:   provenance.NewLocalVCIssuer(vcSigner, issuerDID, statusListPublisher),
 	}
 	go func() {
@@ -563,7 +581,7 @@ func main() {
 		templateRepositoryEndpoints           *templaterepository.Endpoints
 		didEntpoints                          *didservice.Endpoints
 		c2paEndpoints                         *c2paservice.Endpoints
-		internalSigningEndpoints              *internalsigning.Endpoints
+		semanticHubEndpoints                  *semantichubgen.Endpoints
 	)
 	{
 		authEndpoints = genauth.NewEndpoints(authSvc)
@@ -582,6 +600,7 @@ func main() {
 		pdfGenerationEndpoints.Use(debug.LogPayloads())
 		pdfGenerationEndpoints.Use(log.Endpoint)
 		processAuditAndComplianceEndpoints = processauditandcompliance.NewEndpoints(processAuditAndComplianceSvc)
+		processAuditAndComplianceEndpoints.Use(auth.AccessMetadataMiddleware)
 		processAuditAndComplianceEndpoints.Use(debug.LogPayloads())
 		processAuditAndComplianceEndpoints.Use(log.Endpoint)
 		signatureManagementEndpoints = signaturemanagement.NewEndpoints(signatureManagementSvc)
@@ -599,9 +618,9 @@ func main() {
 		c2paEndpoints = c2paservice.NewEndpoints(c2paSvc)
 		c2paEndpoints.Use(debug.LogPayloads())
 		c2paEndpoints.Use(log.Endpoint)
-		internalSigningEndpoints = internalsigning.NewEndpoints(internalSigningSvc)
-		internalSigningEndpoints.Use(debug.LogPayloads())
-		internalSigningEndpoints.Use(log.Endpoint)
+		semanticHubEndpoints = semantichubgen.NewEndpoints(semanticHubSvc)
+		semanticHubEndpoints.Use(debug.LogPayloads())
+		semanticHubEndpoints.Use(log.Endpoint)
 	}
 
 	// Setup interrupt handler. This optional step configures the process so
@@ -644,7 +663,7 @@ func main() {
 			} else if u.Port() == "" {
 				u.Host = net.JoinHostPort(u.Host, "80")
 			}
-			handleHTTPServer(ctx, u, authEndpoints, contractStorageArchiveEndpoints, contractWorkflowEngineEndpoints, dcsToDcsEndpoints, pdfGenerationEndpoints, processAuditAndComplianceEndpoints, signatureManagementEndpoints, templateCatalogueIntegrationEndpoints, templateRepositoryEndpoints, didEntpoints, c2paEndpoints, internalSigningEndpoints, webhookPlatform, &wg, errc, *dbgF)
+			handleHTTPServer(ctx, u, authEndpoints, contractStorageArchiveEndpoints, contractWorkflowEngineEndpoints, dcsToDcsEndpoints, pdfGenerationEndpoints, processAuditAndComplianceEndpoints, signatureManagementEndpoints, templateCatalogueIntegrationEndpoints, templateRepositoryEndpoints, didEntpoints, c2paEndpoints, semanticHubEndpoints, webhookPlatform, &wg, errc, *dbgF)
 		}
 
 	default:

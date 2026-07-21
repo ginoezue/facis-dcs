@@ -1,14 +1,14 @@
+import type { ContractChangeRequest, ExpirationPolicy } from '../contract/contract'
+import type { ContractData } from '../contract-data'
 import type { ContractActionFlag } from '@/types/contract-action-flag'
 import type { ContractState } from '@/types/contract-state'
 import type { NegotiationActionFlag } from '@/types/negotiation-action-flag'
-import type { ContractData } from '../contract-data'
-import type { ContractChangeRequest, ExpirationPolicy } from '../contract/contract'
 
 export interface ContractCreateRequest {
   template_did: string
-  reviewers?: string[]
-  approvers?: string[]
-  negotiators?: string[]
+  /** The counterparty DCS this contract is offered to and negotiated with (a
+   *  `did:web` peer, ADR-13). Omitted for a purely local contract. */
+  counterparty?: string
 }
 
 export interface ContractUpdateRequest {
@@ -107,6 +107,11 @@ export interface ContractHistoryRetrieveRequest {
 }
 
 export interface ContractDeployRequest {
+  did: string
+  updated_at: string
+}
+
+export interface ContractOfferRequest {
   did: string
   updated_at: string
 }

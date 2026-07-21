@@ -23,7 +23,6 @@ import (
 	"digital-contracting-service/internal/contractworkflowengine/datatype/contractstate"
 	"digital-contracting-service/internal/contractworkflowengine/db"
 	contractevents "digital-contracting-service/internal/contractworkflowengine/event"
-	"digital-contracting-service/internal/contractworkflowengine/remotesync/remoteaction"
 	semanticmapper "digital-contracting-service/internal/semantic/mapper"
 )
 
@@ -75,25 +74,6 @@ func (h *Approver) Handle(ctx context.Context, cmd ApproveCmd) error {
 		return err
 	}
 
-	if processData.Origin != localPeer && cmd.CauserDID != processData.Origin {
-		/*
-			Not the Origin peer for this contract: forward unchanged instead of
-			mutating locally (single-writer-per-aggregate, see package doc).
-		*/
-
-		err := tx.Commit()
-		if err != nil {
-			return fmt.Errorf("could not commit transaction: %w", err)
-		}
-
-		err = remoteaction.Approve.Execute(ctx, h.DB, h.DIDDocument, processData.Origin, processData.DID, cmd)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}
-
 	// Optimistic concurrency: reject if the caller's view of the contract is
 	// older than what's stored (see package doc / ADR-0007). The distinct
 	// messages tell a local caller to simply reload vs. a forwarded/remote
@@ -140,6 +120,13 @@ func (h *Approver) Handle(ctx context.Context, cmd ApproveCmd) error {
 		return err
 	}
 
+	// SRS Contract Approval verifies schema completeness: an approved contract
+	// must be closed — no unresolved placeholders (negotiated boundaries,
+	// required fields, prose placeholders).
+	if err := validation.ValidateContractClosed(*contractForPolicyValidation.ContractData); err != nil {
+		return err
+	}
+
 	err = h.ATRepo.UpdateState(ctx, tx, cmd.DID, cmd.CauserDID, approvaltaskstate.Approved.String())
 	if err != nil {
 		return fmt.Errorf("could not update approval task state: %w", err)
@@ -160,10 +147,7 @@ func (h *Approver) Handle(ctx context.Context, cmd ApproveCmd) error {
 		if err != nil {
 			return fmt.Errorf("could not read approved contract for archive storage: %w", err)
 		}
-		finalContractData, err := semanticmapper.MaterializeStoredContractJSONLD(
-			*approvedContract,
-			semanticmapper.DefaultProfile(),
-		)
+		finalContractData, err := semanticmapper.BuildContractJSONLD(*approvedContract)
 		if err != nil {
 			return fmt.Errorf("could not materialize approved contract JSON-LD: %w", err)
 		}

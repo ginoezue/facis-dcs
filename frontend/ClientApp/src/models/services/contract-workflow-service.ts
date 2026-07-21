@@ -7,6 +7,7 @@ import type {
   ContractHistoryRetrieveRequest,
   ContractNegotiationRequest,
   ContractNegotiationRespondRequest,
+  ContractOfferRequest,
   ContractRejectRequest,
   ContractRetrieveByIdRequest,
   ContractRetrieveRequest,
@@ -26,6 +27,7 @@ import type {
   ContractHistoryResponse,
   ContractNegotiationRespondResponse,
   ContractNegotiationResponse,
+  ContractOfferResponse,
   ContractRejectResponse,
   ContractRetrieveResponse,
   ContractReviewResponse,
@@ -39,6 +41,7 @@ import type {
 export interface ContractWorkflowService {
   create: (request: ContractCreateRequest) => Promise<ContractCreateResponse>
   update: (request: ContractUpdateRequest) => Promise<ContractUpdateResponse>
+  offer: (request: ContractOfferRequest) => Promise<ContractOfferResponse>
   submit: (request: ContractSubmitRequest) => Promise<ContractSubmitResponse>
   negotiate: (request: ContractNegotiationRequest) => Promise<ContractNegotiationResponse>
   respond: (request: ContractNegotiationRespondRequest) => Promise<ContractNegotiationRespondResponse>
@@ -55,6 +58,7 @@ export interface ContractWorkflowService {
   audit: (request: ContractAuditRequest) => Promise<ContractAuditResponse>
   retrieveHistoryByDid: (request: ContractHistoryRetrieveRequest) => Promise<ContractHistoryResponse>
   exportPdf: (did: string) => Promise<Blob>
+  exportBundle: (did: string) => Promise<Blob>
   verifyPdf: (did: string) => Promise<{
     match: boolean
     jsonld_hash: string

@@ -1,93 +1,62 @@
-# Requirement: real-signing-vertical
+# Real signing vertical - PAdES signature, EUDIPLO signing ceremony, PID
+# binding (SRS: DCS-FR-SM-08/-14/-16/-18, DCS-IR-SI-10, DCS-FR-CWE-04).
 #
-# Covers Workstream B ("Real signing vertical: PAdES + EUDIPLO ceremony + PID
-# binding", docs/anforderung.md Zeilen 145-199) - only the ACs the analyst
-# marked Pruefmittel = BDD: AC1-AC6, AC8-AC17, AC19.
-#
-# Deliberately OUT of scope for this pack:
-#   - AC7 (Pruefmittel = grep-gate: the "dss" -> "signer"/ContractSigner
-#     rename + STUB_SIGNATURE_PLACEHOLDER/credential_type:'stub' removal -
-#     checked by the verifier via grep, not a Gherkin scenario).
-#   - AC18 (Pruefmittel = extern-validiert - the Adobe/DSS-demo-webapp manual
-#     validation step in B-acceptance).
-#
-# See steps/real_signing_vertical/dcs_real_signing_vertical_steps.py's module
-# docstring for the full rationale behind every binding decision and design
-# gap summarized below:
+# Harness notes (see steps/real_signing_vertical/
+# dcs_real_signing_vertical_steps.py's module docstring for the full
+# rationale behind each binding decision):
 #
 #   1. pdf-core's own POST /sign is not reachable from this harness at all
-#      (only the backend is, via BDD_DCS_BASE_URL) - AC1-AC5/AC9/AC14/AC15/
-#      AC17/AC19 exercise PAdES indirectly through POST /signature/apply
-#      (extended per B2) and inspect the PDF bytes GET /pdf/export/contract/
-#      {did} serves afterwards, using the same direct-byte-search technique
-#      already established elsewhere in this codebase's BDD packs.
-#   2. POST /signature/request, GET /signature/request/{id}, and POST
-#      /signature/request/webhook do not exist in backend/design/*.go yet -
-#      AC10-AC13 are written against the ASSUMED contract docs/anforderung.md
-#      B3 specifies verbatim.
-#   3. EUDIPLO is never co-deployed here; this harness plays the "EUDIPLO
+#      (only the backend is, via BDD_DCS_BASE_URL) - PAdES is exercised
+#      indirectly through POST /signature/apply and by inspecting the PDF
+#      bytes GET /pdf/export/contract/{did} serves afterwards, using the
+#      same direct-byte-search technique established elsewhere in this
+#      codebase's BDD packs.
+#   2. EUDIPLO is never co-deployed here; this harness plays the "EUDIPLO
 #      test client" role itself, POSTing a real, protocol-correct SD-JWT VC +
-#      KB-JWT PID presentation straight at the assumed webhook contract
-#      (built with the existing testWallet/dcs_wallet signing primitives).
-#   4. The webhook shared-secret header name (X-EUDIPLO-Webhook-Secret) is
-#      assumed - open point for the architect/implementer.
-#   5. Byte-level PDF assertions (SubFilter, x5chain, RFC3161 timestamp,
+#      KB-JWT PID presentation straight at the ceremony webhook
+#      (POST /signature/request/webhook, authenticated via the
+#      X-EUDIPLO-Webhook-Secret shared-secret header), built with the
+#      testWallet/dcs_wallet signing primitives.
+#   3. Byte-level PDF assertions (SubFilter, x5chain, RFC3161 timestamp,
 #      ByteRange coverage) are direct-byte-search heuristics, not a full PDF/
 #      CMS/ASN.1 parse - each documents its own precision limit at its point
 #      of use in the steps module.
 #
-# Design gaps (open points for architect/analyst):
-#   a) AC3's PAdES-B-B fallback path cannot be driven by this harness (same
-#      class of "restart with deliberately broken config" problem as
-#      pki-consolidation-pkcs11's AC1 negative path) - documented as an
-#      accepted manual/ops verification concern, not a Gherkin scenario.
-#   b) AC16 needs the same unavailable "upload a tampered PDF and verify it"
-#      seam already identified for c2pa-conformance's AC4 and
-#      contract_format_review's "Tampered PDF fails hash verification" - @skip
-#      here, following that precedent.
-#   c) AC20 (Signature Manager UI: QR/poll/result, AES badge) has no coverage
-#      in this pack - this repo-root BDD harness has no browser-automation
-#      convention at all (see features/16_other/frontend.feature, a bare
-#      reachability check). The SERVICE-LEVEL contract the UI would call is
-#      already exercised by AC10-AC13/AC19 below; the UI-specific rendering
-#      claims are recorded as an explicit coverage gap, not fabricated.
+# The Signature Manager UI (QR/poll/result modal, AES badge) has no coverage
+# in this pack - this repo-root BDD harness has no browser-automation
+# convention at all (see features/16_other/frontend.feature, a bare
+# reachability check). The service-level contract the UI would call is
+# already exercised by the ceremony scenarios below; the UI-specific
+# rendering claims are recorded as an explicit coverage gap via the final
+# @skip scenario, not fabricated.
 
 @DCS-FR-SM-16 @DCS-IR-SI-10
-Feature: Real signing vertical - PAdES signature, EUDIPLO ceremony, PID binding (Workstream B)
+Feature: Real signing vertical - PAdES signature, EUDIPLO ceremony, PID binding
 
   # ---------------------------------------------------------------------
-  # B1 - pdf-core POST /sign (PAdES), exercised indirectly via
-  # POST /signature/apply after a completed ceremony (see steps module
+  # PAdES signature production - pdf-core POST /sign, exercised indirectly
+  # via POST /signature/apply after a completed ceremony (see steps module
   # docstring point 1).
   # ---------------------------------------------------------------------
 
-  @REQ-real-signing-vertical-AC1 @DCS-OR-C2PA-002 @DCS-OR-C2PA-010
+  @DCS-OR-C2PA-002 @DCS-OR-C2PA-010
   Scenario: Applying a signature produces a PDF with a cryptographically valid PAdES signature in the named AcroForm field
     Given contract "RSV AcroForm Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerOne"
-    Then the signed PDF for contract "RSV AcroForm Contract" contains a PAdES signature naming AcroForm field "SignerOne"
+    Then the signed PDF for contract "RSV AcroForm Contract" contains a PAdES signature naming the signing party AcroForm field
     And the signed PDF for contract "RSV AcroForm Contract" has a structurally valid PAdES ByteRange
 
-  @REQ-real-signing-vertical-AC2 @DCS-OR-C2PA-002 @DCS-OR-C2PA-010
+  @DCS-OR-C2PA-002 @DCS-OR-C2PA-010
   Scenario: The PAdES signature declares SubFilter ETSI.CAdES.detached with a full embedded x5chain
     Given contract "RSV SubFilter Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerTwo"
     Then the signed PDF for contract "RSV SubFilter Contract" declares SubFilter ETSI.CAdES.detached
     And the signed PDF for contract "RSV SubFilter Contract" embeds a non-empty X.509 certificate chain
 
-  @REQ-real-signing-vertical-AC3 @DCS-OR-C2PA-002 @DCS-OR-C2PA-010
+  @DCS-OR-C2PA-002 @DCS-OR-C2PA-010
   Scenario: The PAdES signature carries an RFC3161 timestamp from the configured TSA (PAdES-B-T)
     Given contract "RSV Timestamp Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerThree"
     Then the signed PDF for contract "RSV Timestamp Contract" embeds an RFC3161 timestamp token
 
-  @REQ-real-signing-vertical-AC3 @DCS-OR-C2PA-002 @skip
-  Scenario: PAdES-B-B fallback when the TSA is unavailable is a documented deviation, not exercised here
-    # See design-gap (a) in the header comment above: this would require
-    # restarting the single running backend instance with a deliberately
-    # broken/missing TSA_URL mid-run, which this harness cannot do (identical
-    # class of problem as pki-consolidation-pkcs11's AC1 negative path).
-    # Tracked as an accepted manual/ops verification concern.
-    Given I am authenticated with roles: "Contract Manager"
-
-  @REQ-real-signing-vertical-AC4 @DCS-OR-C2PA-002 @DCS-OR-C2PA-010
+  @DCS-OR-C2PA-002 @DCS-OR-C2PA-010
   Scenario: The order /update -> /sign -> /update leaves the PAdES signature and C2PA chain valid
     Given contract "RSV Order Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerFour"
     When the signature for contract "RSV Order Contract" is revoked as a post-sign C2PA update
@@ -99,58 +68,57 @@ Feature: Real signing vertical - PAdES signature, EUDIPLO ceremony, PID binding 
     And the verification result shows match is true
 
   # ---------------------------------------------------------------------
-  # B2 - real contract signer + apply-flow fixes
+  # Contract signer + apply flow
   # ---------------------------------------------------------------------
 
-  @REQ-real-signing-vertical-AC5 @DCS-FR-SM-16 @DCS-IR-SI-10
+  @DCS-FR-SM-16 @DCS-IR-SI-10
   Scenario: The applied signature is a real PAdES signature persisted with an IPFS CID, not the stub placeholder
     Given contract "RSV No Stub Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerFive"
     Then the contract_signatures row for contract "RSV No Stub Contract" is a real signature, not the STUB placeholder
 
-  @REQ-real-signing-vertical-AC6 @FR-SM-18 @DCS-IR-SI-10
+  @FR-SM-18 @DCS-IR-SI-10
   Scenario: The apply endpoint honors the requested signer_did and credential_type instead of discarding them
     Given contract "RSV Apply Fields Contract" is APPROVED and has completed a signing ceremony for signatory "ExplicitFieldsSigner"
     When contract signer applies a signature to contract "RSV Apply Fields Contract" using the ceremony's signer_did and credential_type "AES"
     Then get http 200:Success code
     And the signature envelope for contract "RSV Apply Fields Contract" reflects the ceremony's signer_did and credential_type "AES"
 
-  @REQ-real-signing-vertical-AC8 @DCS-FR-SM-16 @FR-SM-25 @UC-04-02
+  @DCS-FR-SM-16 @FR-SM-25 @UC-04-02
   Scenario: Apply is refused with a typed error until a completed PID presentation exists for the signer
     Given contract "RSV Ceremony Gate Contract" has reached contract state "APPROVED"
     When contract signer applies a signature to contract "RSV Ceremony Gate Contract" without a prior signing ceremony
     Then the apply request is rejected with a typed ceremony-required error
 
-  @REQ-real-signing-vertical-AC9 @DCS-FR-CWE-04
+  @DCS-FR-CWE-04
   Scenario: The signature record binds both the PDF hash and the JSON-LD content hash
     Given contract "RSV Dual Hash Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerSix"
     Then the contract_signatures row for contract "RSV Dual Hash Contract" records both a PDF hash and a JSON-LD content hash
 
   # ---------------------------------------------------------------------
-  # B3 - EUDIPLO signing ceremony (assumed endpoint contract - see steps
-  # module docstring point 2)
+  # EUDIPLO signing ceremony (see steps module docstring point 2)
   # ---------------------------------------------------------------------
 
-  @REQ-real-signing-vertical-AC10 @FR-SM-14
+  @FR-SM-14
   Scenario: POST /signature/request starts a ceremony for an authorized Contract Signer
     Given contract "RSV Ceremony Start Contract" has reached contract state "APPROVED"
     When I start a signing ceremony for contract "RSV Ceremony Start Contract" field "SignerSeven" as "Contract Signer"
     Then get http 200:Success code
     And the ceremony response includes a ceremony_id, wallet_uri, and expires_at
 
-  @REQ-real-signing-vertical-AC10 @FR-SM-14
+  @FR-SM-14
   Scenario: POST /signature/request denies a caller without an authorized signing role
     Given contract "RSV Ceremony Denied Contract" has reached contract state "APPROVED"
     When I start a signing ceremony for contract "RSV Ceremony Denied Contract" field "SignerEight" as "Contract Observer"
     Then the ceremony start request is denied for that role
 
-  @REQ-real-signing-vertical-AC11 @FR-SM-14
+  @FR-SM-14
   Scenario: GET /signature/request/{id} reports the ceremony's lifecycle status as it progresses
     Given contract "RSV Ceremony Status Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerNine"
     When I poll the signing ceremony status for contract "RSV Ceremony Status Contract"
     Then get http 200:Success code
     And the signing ceremony for contract "RSV Ceremony Status Contract" has status "verified"
 
-  @REQ-real-signing-vertical-AC12 @NFR-SEC-18 @FR-SM-14
+  @NFR-SEC-18 @FR-SM-14
   Scenario: The webhook receiver marks the ceremony verified and persists PID claims when the shared secret is correct
     Given contract "RSV Webhook Auth Contract" has reached contract state "APPROVED"
     When I start a signing ceremony for contract "RSV Webhook Auth Contract" field "SignerTen" as "Contract Signer"
@@ -160,7 +128,7 @@ Feature: Real signing vertical - PAdES signature, EUDIPLO ceremony, PID binding 
     When I poll the signing ceremony status for contract "RSV Webhook Auth Contract"
     Then the signing ceremony for contract "RSV Webhook Auth Contract" has status "verified"
 
-  @REQ-real-signing-vertical-AC12 @NFR-SEC-18 @FR-SM-14
+  @NFR-SEC-18 @FR-SM-14
   Scenario: The webhook receiver rejects a request presenting an incorrect shared secret
     Given contract "RSV Webhook Bad Secret Contract" has reached contract state "APPROVED"
     When I start a signing ceremony for contract "RSV Webhook Bad Secret Contract" field "SignerEleven" as "Contract Signer"
@@ -168,7 +136,7 @@ Feature: Real signing vertical - PAdES signature, EUDIPLO ceremony, PID binding 
     When a caller posts the EUDIPLO webhook for contract "RSV Webhook Bad Secret Contract" with an incorrect shared secret
     Then the webhook request is rejected for the incorrect shared secret
 
-  @REQ-real-signing-vertical-AC13 @UC-04-02
+  @UC-04-02
   Scenario: The ceremony completes headlessly by fulfilling the OID4VP presentation/webhook contract, no wallet UI involved
     Given contract "RSV Headless Ceremony Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerTwelve"
     When I poll the signing ceremony status for contract "RSV Headless Ceremony Contract"
@@ -176,45 +144,57 @@ Feature: Real signing vertical - PAdES signature, EUDIPLO ceremony, PID binding 
     And the signing ceremony for contract "RSV Headless Ceremony Contract" has status "verified"
 
   # ---------------------------------------------------------------------
-  # B4 - identity binding: PID fragment + signing-summary VC embedded UNDER
-  # the signature (embed-first-sign-second)
+  # Signer binding: the pseudonymous holder DID + signing-summary VC embedded
+  # UNDER the signature (embed-first-sign-second). The PID itself is NEVER
+  # embedded — personal data stays out of the shared PDF (eIDAS/GDPR).
   # ---------------------------------------------------------------------
 
-  @REQ-real-signing-vertical-AC14 @DCS-FR-SM-08 @NFR-SEC-18
-  Scenario: The presented SD-JWT VC + KB-JWT is embedded verbatim before signing, inside the PAdES ByteRange
+  @DCS-FR-SM-08 @NFR-SEC-18
+  Scenario: The signer PID is NOT embedded in the signed PDF (privacy), only the pseudonymous binding
     Given contract "RSV Verbatim Presentation Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerThirteen"
-    Then the SD-JWT VC presentation for contract "RSV Verbatim Presentation Contract" is embedded verbatim inside the PAdES ByteRange
+    Then the signer PID for contract "RSV Verbatim Presentation Contract" is NOT embedded in the signed PDF, only the pseudonymous binding
 
-  @REQ-real-signing-vertical-AC15 @DCS-FR-SM-08
+  @DCS-FR-SM-08
   Scenario: A ContractSigningSummaryCredential is issued and embedded under the signature
     Given contract "RSV Summary VC Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerFourteen"
     Then a ContractSigningSummaryCredential for contract "RSV Summary VC Contract" is embedded inside the PAdES ByteRange
 
-  @REQ-real-signing-vertical-AC16 @DCS-FR-SM-08 @skip
-  Scenario: Removing the signature-evidence attachment invalidates the PAdES validation
-    # See design-gap (b) in the header comment above: every verify-shaped
-    # endpoint this harness can reach always re-fetches the SERVER'S OWN
-    # stored PDF by DID - there is no upload-a-tampered-PDF-and-verify-it
-    # endpoint, the identical class of problem already accepted for
-    # c2pa-conformance's AC4 (@skip) and contract_format_review's "Tampered
-    # PDF fails hash verification" (@skip). Real evidence for this claim is
-    # expected from pdf-core's own pyHanko-based BDD harness (per
-    # docs/anforderung.md B-acceptance: "write this as an explicit test")
-    # or a Go-level unit test mocking IPFSClient.FetchFile.
-    Given I am authenticated with roles: "Contract Manager"
+  # @skip — deferred BY DECISION. The wallet-driven remote-signing ceremony
+  # produces the PAdES signature over the PDF; a detached JAdES over the
+  # machine-readable JSON-LD is not yet emitted by the wallet/DSS path. The
+  # vertical takes precedence; wallet-JAdES is follow-up research. Un-skip once
+  # the ceremony emits the JAdES artifact.
+  @DCS-FR-SM-02 @DCS-FR-SM-11 @skip
+  Scenario: The ceremony also produces a JAdES signature over the machine-readable JSON-LD
+    Given contract "RSV JAdES Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerJades"
+    Then the signature view for contract "RSV JAdES Contract" carries a JAdES signature that verifies over the contract JSON-LD
 
-  @REQ-real-signing-vertical-AC17 @UC-04-02 @UC-04-03
-  Scenario: The verify side re-verifies the embedded PID presentation and cross-checks it against the signature record
+  # Uses the IPFS CID-swap seam (steps/support/tamper_seam.py). See
+  # steps/real_signing_vertical/dcs_real_signing_vertical_tamper_steps.py's
+  # module docstring for why the observable signal here is
+  # /signature/validate's embedded-PID cross-check finding, not a literal
+  # PAdES cryptographic signature verdict — no endpoint reachable by this
+  # harness re-verifies the CMS signature over its /ByteRange, and
+  # pdf-core's own /verify treats the entire PAdES-signed span (including
+  # the evidence attachment) as an opaque, unchecked suffix by design.
+  @DCS-FR-SM-08
+  Scenario: Corrupting the signature-evidence attachment invalidates the embedded-PID cross-check
+    Given contract "RSV Evidence Tamper Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerEvidenceTamper"
+    When the signature-evidence attachment for contract "RSV Evidence Tamper Contract" is corrupted on the server-stored PDF
+    Then the signature validation findings for contract "RSV Evidence Tamper Contract" report the embedded signing evidence as invalid
+
+  @UC-04-02 @UC-04-03
+  Scenario: The verify side cross-checks the embedded signer binding against the signature record
     Given contract "RSV Verify Crosscheck Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerFifteen"
     When I validate the signature for contract "RSV Verify Crosscheck Contract"
     Then get http 200:Success code
-    And the signature validation findings for contract "RSV Verify Crosscheck Contract" cross-check the embedded PID evidence
+    And the signature validation findings for contract "RSV Verify Crosscheck Contract" cross-check the embedded signer binding
 
   # ---------------------------------------------------------------------
-  # B-acceptance - full e2e
+  # Full end-to-end
   # ---------------------------------------------------------------------
 
-  @REQ-real-signing-vertical-AC19 @UC-04-02 @UC-04-03 @DCS-FR-SM-16
+  @UC-04-02 @UC-04-03 @DCS-FR-SM-16
   Scenario: End-to-end - accept, ceremony, AES-signed PDF, verify stays green, contract_signatures carries AES + ipfs_cid + ceremony link
     Given contract "RSV E2E Contract" has an AES-signed PDF via a completed ceremony for signatory "SignerSixteen"
     When contract "RSV E2E Contract" is exported and verified as PDF
@@ -224,21 +204,20 @@ Feature: Real signing vertical - PAdES signature, EUDIPLO ceremony, PID binding 
     And the contract_signatures row for contract "RSV E2E Contract" is linked to a signature_ceremonies row
 
   # ---------------------------------------------------------------------
-  # B5 - Signature Manager UI: documented coverage gap (see design-gap (c)
-  # in the header comment above). No fabricated pass/fail - the tag/
-  # traceability is kept present via @skip.
+  # Signature Manager UI: documented coverage gap (see the header comment
+  # above). No fabricated pass/fail - the traceability is kept present via
+  # @skip.
   # ---------------------------------------------------------------------
 
-  @REQ-real-signing-vertical-AC20 @skip
+  @skip
   Scenario: Signature Manager UI ceremony flow and AES badge - not provable from this HTTP-only BDD harness
     # This repo-root BDD harness has no browser-automation convention (see
     # features/16_other/frontend.feature - a bare reachability check). The
     # service-level contract the UI would call (start ceremony, poll status,
-    # apply, AES credential_type) is already exercised end-to-end by AC10-
-    # AC13/AC19 above. The UI-specific claims - frontend/ClientApp/src/
-    # services/signature-management-service.ts no longer hardcoding
-    # credential_type: 'stub', the QR/poll/result modal, and the AES badge
-    # render - need a browser-level test this harness does not have; recorded
-    # here as an explicit coverage gap for the analyst/architect, not a
-    # fabricated result.
+    # apply, AES credential_type) is already exercised end-to-end by the
+    # ceremony and e2e scenarios above. The UI-specific claims (the
+    # QR/poll/result modal and the AES badge render,
+    # frontend/ClientApp/src/services/signature-management-service.ts) need
+    # a browser-level test this harness does not have; recorded here as an
+    # explicit coverage gap, not a fabricated result.
     Given I am authenticated with roles: "Contract Manager"

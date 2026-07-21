@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	contractevents "digital-contracting-service/internal/contractworkflowengine/event"
 )
 
 type ArchiveNotaryPayload struct {
@@ -33,13 +31,15 @@ type ArchiveNotaryReceipt struct {
 }
 
 type HTTPArchiveNotaryClient struct {
-	url        string
-	httpClient *http.Client
+	url         string
+	bearerToken string
+	httpClient  *http.Client
 }
 
-func NewHTTPArchiveNotaryClient(url string) *HTTPArchiveNotaryClient {
+func NewHTTPArchiveNotaryClient(url, bearerToken string) *HTTPArchiveNotaryClient {
 	return &HTTPArchiveNotaryClient{
-		url: strings.TrimSpace(url),
+		url:         strings.TrimSpace(url),
+		bearerToken: strings.TrimSpace(bearerToken),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -49,6 +49,9 @@ func NewHTTPArchiveNotaryClient(url string) *HTTPArchiveNotaryClient {
 func (c *HTTPArchiveNotaryClient) NotarizeArchiveEntry(ctx context.Context, payload ArchiveNotaryPayload) (*ArchiveNotaryReceipt, error) {
 	if c == nil || c.url == "" {
 		return nil, fmt.Errorf("archive notary URL is empty")
+	}
+	if c.bearerToken == "" {
+		return nil, fmt.Errorf("archive notary bearer token is empty")
 	}
 
 	body, err := json.Marshal(payload)
@@ -61,6 +64,7 @@ func (c *HTTPArchiveNotaryClient) NotarizeArchiveEntry(ctx context.Context, payl
 		return nil, fmt.Errorf("create archive notary request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.bearerToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -91,21 +95,4 @@ func (c *HTTPArchiveNotaryClient) NotarizeArchiveEntry(ctx context.Context, payl
 	}
 
 	return &receipt, nil
-}
-
-func archiveNotaryEntryID(did string, contractVersion int) string {
-	return fmt.Sprintf("%s#%d", did, contractVersion)
-}
-
-func archiveNotaryEventReceipt(receipt *ArchiveNotaryReceipt) *contractevents.ArchiveNotaryReceipt {
-	if receipt == nil {
-		return nil
-	}
-	return &contractevents.ArchiveNotaryReceipt{
-		ReceiptType:    receipt.ReceiptType,
-		ArchiveEntryID: receipt.ArchiveEntryID,
-		EventHash:      receipt.EventHash,
-		PreviousHash:   receipt.PreviousHash,
-		ReceivedAt:     receipt.ReceivedAt,
-	}
 }

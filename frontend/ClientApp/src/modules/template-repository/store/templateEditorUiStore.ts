@@ -1,20 +1,19 @@
 import { defineStore } from 'pinia'
+import { useAuthStore } from '@/stores/auth-store'
+import { TemplateType, type TemplateTypeValue } from '../models/contract-template'
 import type {
-  TemplateEditorUiState,
-  TemplateEditorTabId,
   BlockMovementPreview,
   ClausePlaceholderHighlight,
   PendingClauseDraft,
+  TemplateEditorTabId,
+  TemplateEditorUiState,
 } from '@template-repository/models/template-editor-ui-store'
-import { useAuthStore } from '@/stores/auth-store'
-import { TemplateType, type TemplateTypeValue } from '../models/contract-template'
 
 const storeId = 'templateEditorUi'
 const defaultState: Readonly<TemplateEditorUiState> = {
   activeTab: 'details',
   tabs: [
     { id: 'details', label: 'Details' },
-    { id: 'semantic', label: 'Data Requirements' },
     { id: 'clauses', label: 'Clauses' },
     { id: 'builder', label: 'Builder' },
     { id: 'meta', label: 'Meta Data' },
@@ -78,7 +77,7 @@ export const useTemplateEditorUiStore = defineStore(storeId, {
       const isManager = useAuthStore().user?.roles?.includes('TEMPLATE_MANAGER') ?? false
       const tabs = this.tabs.filter((tab) => tab.id !== 'audit' || isManager)
       if (templateType === TemplateType.component) return tabs
-      return tabs.filter((tab) => !['semantic', 'clauses'].includes(tab.id))
+      return tabs.filter((tab) => tab.id !== 'clauses')
     },
     setTemplateEditable(isEditable: boolean) {
       this.isTemplateEditable = isEditable

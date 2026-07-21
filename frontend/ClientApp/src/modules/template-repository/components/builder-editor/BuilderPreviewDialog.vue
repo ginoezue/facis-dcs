@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import { storeToRefs } from 'pinia'
-import { useTemplateEditorUiStore } from '@template-repository/store/templateEditorUiStore'
-import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
 import TemplatePreview from '@template-repository/components/builder-editor/preview/TemplatePreview.vue'
+import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
+import { useTemplateEditorUiStore } from '@template-repository/store/templateEditorUiStore'
+import { storeToRefs } from 'pinia'
 
 const uiStore = useTemplateEditorUiStore()
 const draftStore = useDcsDraftStore()
 
 const { isPreviewDialogOpen } = storeToRefs(uiStore)
-const { layout, blocks, semanticConditions, subTemplateSnapshots } = storeToRefs(draftStore)
+const { layout, blocks, semanticConditions } = storeToRefs(draftStore)
 
 // This container is block, not flex
 const previewContainerClasses = 'w-full h-full overflow-auto px-10 py-8'
@@ -48,7 +48,6 @@ function close() {
                   :layout="layout"
                   :blocks="blocks"
                   :semantic-conditions="semanticConditions"
-                  :sub-template-snapshots="subTemplateSnapshots"
                 />
               </div>
             </div>

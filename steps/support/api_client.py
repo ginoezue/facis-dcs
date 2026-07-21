@@ -59,6 +59,10 @@ def contract_retrieve_by_id_url(context, did: str) -> str:
     return f"{context.base_url}/contract/retrieve/{did}"
 
 
+def contract_history_url(context, did: str) -> str:
+    return f"{context.base_url}/contract/history/{did}"
+
+
 def contract_verify_url(context) -> str:
     return f"{context.base_url}/contract/verify"
 
@@ -75,6 +79,10 @@ def contract_terminate_url(context) -> str:
     return f"{context.base_url}/contract/terminate"
 
 
+def contract_renew_url(context) -> str:
+    return f"{context.base_url}/contract/renew"
+
+
 def contract_search_url(context) -> str:
     return f"{context.base_url}/contract/search"
 
@@ -83,12 +91,7 @@ def contract_audit_url(context) -> str:
     return f"{context.base_url}/contract/audit"
 
 
-# Deployment (Workstream G, docs/anforderung.md G2): ASSUMED endpoint shapes —
-# neither exists in backend/design/*.go yet (grep backend/design -rn "deploy"
-# only finds the pre-existing "approve" method's descriptive Meta string and
-# the EventDeploy state-machine edge, see contractstate/transition.go). Path/
-# names taken verbatim from docs/anforderung.md G2 ("POST /contract/deploy",
-# "POST /contract/deployment/callback").
+# Deployment endpoints (backend/design/contract_workflow_engine.go).
 
 def contract_deploy_url(context) -> str:
     return f"{context.base_url}/contract/deploy"
@@ -108,6 +111,18 @@ def archive_retrieve_url(context) -> str:
 
 def archive_audit_url(context) -> str:
     return f"{context.base_url}/archive/audit"
+
+
+def archive_delete_url(context) -> str:
+    return f"{context.base_url}/archive/delete"
+
+
+def archive_annotate_url(context) -> str:
+    return f"{context.base_url}/archive/annotate"
+
+
+def signature_view_url(context) -> str:
+    return f"{context.base_url}/signature/view"
 
 
 def pac_audit_url(context) -> str:
@@ -130,8 +145,12 @@ def contract_peer_post_sync_url(context) -> str:
     return f"{context.base_url}/peer/contracts/"
 
 
-def signature_apply_url(context) -> str:
-    return f"{context.base_url}/signature/apply"
+def signature_prepare_url(context) -> str:
+    return f"{context.base_url}/signature/prepare"
+
+
+def signature_submit_url(context) -> str:
+    return f"{context.base_url}/signature/submit"
 
 
 def signature_revoke_url(context) -> str:
@@ -146,12 +165,15 @@ def signature_retrieve_url(context, did: str) -> str:
     return f"{context.base_url}/signature/retrieve/{did}"
 
 
-# Signing-ceremony endpoints (Workstream B3, docs/anforderung.md B3): an
-# ASSUMED endpoint contract — none of these exist in backend/design/*.go yet
-# (grep backend/design -rn "signature/request" returns nothing at the time
-# this pack was written). Path/shape taken verbatim from the anforderung.md
-# B3 section ("name the start endpoint POST /signature/request: that is the
-# SRS's own vocabulary").
+def signature_audit_url(context) -> str:
+    return f"{context.base_url}/signature/audit"
+
+
+def signature_compliance_url(context) -> str:
+    return f"{context.base_url}/signature/compliance"
+
+
+# Signing-ceremony endpoints (backend/design/signature_management.go).
 
 def signature_request_url(context) -> str:
     return f"{context.base_url}/signature/request"
@@ -165,16 +187,16 @@ def signature_request_webhook_url(context) -> str:
     return f"{context.base_url}/signature/request/webhook"
 
 
-# ASSUMED endpoint contract for the PKI-consolidation refactor (Workstream A,
-# docs/anforderung.md AC6 / A2.3): a NEW, authenticated, non-public backend
-# endpoint that signs a COSE Sig_structure via hsm.Signer("dcs-c2pa") for
-# pdf-core. Does not exist in backend/design/*.go yet - see
-# features/21_pki_consolidation_pkcs11/pki_consolidation_pkcs11.feature's
-# header comment (binding decision 1) for the exact assumed payload shape and
-# why the path/shape may need to be adjusted once the architect confirms it.
+def signature_request_publish_url(context, ceremony_id: str) -> str:
+    return f"{context.base_url}/signature/request/{ceremony_id}/publish"
 
-def c2pa_internal_sign_url(context) -> str:
-    return f"{context.base_url}/internal/c2pa/sign"
+
+def signature_request_leaf_url(context, ceremony_id: str, leaf: str) -> str:
+    """Harness-reachable URL for a per-ceremony signing-request sub-resource
+    (object/document/callback). The request object the DCS publishes carries these
+    URLs built from its advertised public base; this rebuilds them on the origin
+    the harness actually routes to."""
+    return f"{context.base_url}/signature/request/{ceremony_id}/{leaf}"
 
 
 def template_create_url(context) -> str:
@@ -201,6 +223,10 @@ def template_verify_url(context) -> str:
     return f"{context.base_url}/template/verify"
 
 
+def template_provenance_url(context, did: str) -> str:
+    return f"{context.base_url}/template/provenance/{did}"
+
+
 def template_approve_url(context) -> str:
     return f"{context.base_url}/template/approve"
 
@@ -223,6 +249,22 @@ def template_audit_url(context) -> str:
 
 def template_search_url(context) -> str:
     return f"{context.base_url}/template/search"
+
+
+def template_publish_url(context) -> str:
+    return f"{context.base_url}/template/publish"
+
+
+def catalogue_template_retrieve_url(context) -> str:
+    return f"{context.base_url}/catalogue/template/retrieve"
+
+
+def catalogue_template_retrieve_by_id_url(context, did: str) -> str:
+    return f"{context.base_url}/catalogue/template/retrieve/{did}"
+
+
+def catalogue_template_search_url(context) -> str:
+    return f"{context.base_url}/catalogue/template/search"
 
 
 # HTTP helpers
@@ -251,6 +293,16 @@ def get_with_headers(context, url: str, headers=None):
     h = headers if headers is not None else getattr(context, "headers", {})
     return requests.get(
         url,
+        headers=h,
+        timeout=context.http_timeout_seconds,
+    )
+
+
+def delete_with_params(context, url: str, params: dict, headers=None):
+    h = headers if headers is not None else getattr(context, "headers", {})
+    return requests.delete(
+        url,
+        params=params,
         headers=h,
         timeout=context.http_timeout_seconds,
     )

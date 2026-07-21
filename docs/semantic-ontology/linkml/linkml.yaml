@@ -59,31 +59,6 @@ classes:
       - signatoryName
       - title
 
-  DataRequirement:
-    class_uri: dcs:DataRequirement
-    slot_usage:
-      conditionId:
-        required: true
-      fields:
-        required: true
-    slots:
-      - conditionId
-      - fields
-      - name
-      - schemaVersion
-
-  RequirementField:
-    class_uri: dcs:RequirementField
-    close_mappings:
-      - schema:PropertyValue
-    slot_usage:
-      parameterName:
-        required: true
-    slots:
-      - domainField
-      - parameterName
-      - required
-
   DocumentStructure:
     class_uri: dcs:DocumentStructure
     slots:
@@ -113,8 +88,10 @@ classes:
   Placeholder:
     class_uri: dcs:Placeholder
     slots:
-      - bindsTo
-      - token
+      - label
+      - datatype
+      - shape
+      - required
 
   TemplateMetadata:
     class_uri: dcs:TemplateMetadata
@@ -141,6 +118,29 @@ classes:
     slots:
       - isRoot
 
+  KPIObservation:
+    class_uri: dcs:KPIObservation
+    description: One KPI value a contract target system reported for a deployed contract.
+    close_mappings:
+      - schema:Observation
+    slot_usage:
+      metricName:
+        required: true
+      observedValue:
+        required: true
+    slots:
+      - aboutContract
+      - metricName
+      - observedAt
+      - observedValue
+      - violation
+
+  KPIObservationSet:
+    class_uri: dcs:KPIObservationSet
+    description: The KPI observations reported for one contract.
+    slots:
+      - observation
+
 slots:
 
   documentTitle:
@@ -149,7 +149,7 @@ slots:
 
   contractData:
     slot_uri: dcs:contractData
-    range: DataRequirement
+    range: Placeholder
     multivalued: true
 
   documentStructure:
@@ -177,17 +177,6 @@ slots:
     range: string
     description: Machine-readable identifier for the signatory role; used as the AcroForm /T field name.
 
-  conditionId:
-    slot_uri: dcs:conditionId
-    range: string
-
-  fields:
-    slot_uri: dcs:fields
-    range: RequirementField
-    multivalued: true
-    close_mappings:
-      - schema:property
-
   name:
     slot_uri: dcs:name
     range: string
@@ -211,15 +200,10 @@ slots:
       - range: Section
       - range: TextBlock
 
-  domainField:
-    slot_uri: dcs:domainField
-    range: uriorcurie
-    close_mappings:
-      - schema:propertyID
-
-  parameterName:
-    slot_uri: dcs:parameterName
+  blockId:
+    slot_uri: dcs:blockId
     range: string
+    description: The document block the value was captured in.
 
   required:
     slot_uri: dcs:required
@@ -243,9 +227,22 @@ slots:
     close_mappings:
       - schema:text
 
-  token:
-    slot_uri: dcs:token
+  label:
+    slot_uri: dcs:label
     range: string
+    description: The human-readable label for the placeholder field.
+    close_mappings:
+      - schema:name
+
+  datatype:
+    slot_uri: dcs:datatype
+    range: string
+    description: The literal datatype of the placeholder value, e.g. "xsd:decimal"; carried inline from the shape's sh:datatype.
+
+  shape:
+    slot_uri: dcs:shape
+    range: uriorcurie
+    description: The SHACL shape this placeholder's value is typed by.
 
   templateType:
     slot_uri: dcs:templateType
@@ -307,7 +304,7 @@ slots:
     slot_uri: dcs:layout
     range: LayoutNode
     multivalued: true
-    list_elements_ordered: false
+    list_elements_ordered: true
 
   children:
     slot_uri: dcs:children
@@ -333,6 +330,63 @@ slots:
       - range: string
       - range: Placeholder
 
-  bindsTo:
-    slot_uri: dcs:bindsTo
-    range: RequirementField
+  wasDerivedFrom:
+    abstract: true
+    slot_uri: prov:wasDerivedFrom
+    range: uriorcurie
+
+  wasRevisionOf:
+    abstract: true
+    slot_uri: prov:wasRevisionOf
+    range: uriorcurie
+
+  derivedFromTemplate:
+    slot_uri: dcs:derivedFromTemplate
+    is_a: wasDerivedFrom
+    range: uriorcurie
+    description: The template this contract instance was derived from.
+
+  renewsContract:
+    slot_uri: dcs:renewsContract
+    is_a: wasRevisionOf
+    range: uriorcurie
+    description: The prior contract instance this renewal supersedes.
+
+  metricName:
+    slot_uri: dcs:metricName
+    range: string
+    close_mappings:
+      - schema:name
+
+  observedValue:
+    slot_uri: dcs:observedValue
+    range: string
+    close_mappings:
+      - schema:value
+
+  observedAt:
+    slot_uri: dcs:observedAt
+    range: datetime
+
+  violation:
+    slot_uri: dcs:violation
+    range: boolean
+    description: Whether the observed value violates an obligation the contract's own ODRL policies declare for the metric.
+
+  aboutContract:
+    slot_uri: dcs:aboutContract
+    range: uriorcurie
+    close_mappings:
+      - schema:about
+
+  observation:
+    slot_uri: dcs:observation
+    range: KPIObservation
+    multivalued: true
+
+  prose:
+    slot_uri: dcs:prose
+    range: uriorcurie
+    description: The human-readable clause node this machine-readable rule is backed by; every ODRL rule a document carries must reference the audited prose it operationalizes.
+    close_mappings:
+      - dcterms:source

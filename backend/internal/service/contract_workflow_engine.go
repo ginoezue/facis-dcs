@@ -10,6 +10,7 @@ import (
 
 	"digital-contracting-service/internal/dcstodcs"
 	db2 "digital-contracting-service/internal/dcstodcs/db"
+	"digital-contracting-service/internal/semantichub"
 
 	contracttemplate2 "digital-contracting-service/internal/contractworkflowengine/query/contracttemplate"
 
@@ -101,8 +102,14 @@ func mapContractCommandError(err error) error {
 	}
 	if errors.Is(err, contractstate.ErrInvalidTransition) ||
 		errors.Is(err, validation.ErrContractHierarchyInvalid) ||
+		errors.Is(err, validation.ErrContractNotClosed) ||
 		errors.Is(err, command.ErrContractHierarchyCycle) ||
-		errors.Is(err, command.ErrDeploymentNotFound) {
+		errors.Is(err, command.ErrDeploymentNotFound) ||
+		errors.Is(err, command.ErrSigningIncomplete) ||
+		errors.Is(err, command.ErrContractNotRenewable) ||
+		errors.Is(err, command.ErrNotAParty) ||
+		errors.Is(err, command.ErrConflictOfInterest) ||
+		errors.Is(err, db.ErrNoMatchingDecision) {
 		return contractworkflowengine.MakeBadRequest(err)
 	}
 	return contractworkflowengine.MakeInternalError(err)
@@ -123,36 +130,34 @@ func (s *contractWorkflowEnginesrvc) Create(ctx context.Context, req *contractwo
 		return nil, contractworkflowengine.MakeInternalError(err)
 	}
 
-	untrustedReviewers, err := dcstodcs.CheckForUntrustedPeers(ctx, s.DB, s.SRepo, localPeer, req.Reviewers)
-	if err != nil {
-		return nil, contractworkflowengine.MakeInternalError(err)
+	counterparty := ""
+	if req.Counterparty != nil {
+		counterparty = *req.Counterparty
 	}
-
-	untrustedAprovers, err := dcstodcs.CheckForUntrustedPeers(ctx, s.DB, s.SRepo, localPeer, req.Approvers)
-	if err != nil {
-		return nil, contractworkflowengine.MakeInternalError(err)
-	}
-
-	untrustedNegotiators, err := dcstodcs.CheckForUntrustedPeers(ctx, s.DB, s.SRepo, localPeer, req.Negotiators)
-	if err != nil {
-		return nil, contractworkflowengine.MakeInternalError(err)
-	}
-
-	untrustedPeers := base.Unique(untrustedReviewers, untrustedAprovers, untrustedNegotiators)
-	if len(untrustedPeers) > 0 {
-		err := fmt.Errorf("untrusted peers are not allowed: %v", untrustedPeers)
-		return nil, contractworkflowengine.MakeBadRequest(err)
+	if counterparty != "" {
+		untrustedPeers, err := dcstodcs.CheckForUntrustedPeers(ctx, s.DB, s.SRepo, localPeer, []string{counterparty})
+		if err != nil {
+			return nil, contractworkflowengine.MakeInternalError(err)
+		}
+		if len(untrustedPeers) > 0 {
+			return nil, contractworkflowengine.MakeBadRequest(fmt.Errorf("untrusted counterparty is not allowed: %v", untrustedPeers))
+		}
 	}
 
 	cmd := command.CreateCmd{
-		DID:         *did,
-		TemplateDID: req.TemplateDid,
-		CreatedBy:   middleware.GetParticipantID(ctx),
-		HolderDID:   middleware.GetHolderDID(ctx),
-		UserRoles:   middleware.GetUserRoles(ctx),
-		Reviewers:   req.Reviewers,
-		Approvers:   req.Approvers,
-		Negotiators: req.Negotiators,
+		DID:          *did,
+		TemplateDID:  req.TemplateDid,
+		CreatedBy:    middleware.GetParticipantID(ctx),
+		HolderDID:    middleware.GetHolderDID(ctx),
+		UserRoles:    middleware.GetUserRoles(ctx),
+		Counterparty: counterparty,
+		Parties:      req.Parties,
+		OriginatorRole: func() string {
+			if req.OriginatorRole != nil {
+				return *req.OriginatorRole
+			}
+			return ""
+		}(),
 	}
 	createHandler := command.Creator{
 		DB:          s.DB,
@@ -307,9 +312,6 @@ func (s *contractWorkflowEnginesrvc) Submit(ctx context.Context, req *contractwo
 		ActionFlag:   actionFlag,
 		Comments:     req.Comments,
 		ContractData: contractData,
-		Reviewers:    req.Reviewers,
-		Approvers:    req.Approvers,
-		Negotiators:  req.Negotiators,
 		CauserDID:    localPeer,
 	}
 	handler := command.Submitter{
@@ -474,11 +476,17 @@ func (s *contractWorkflowEnginesrvc) RetrieveByID(ctx context.Context, req *cont
 	ctx, cancel := context.WithTimeout(ctx, conf.TransactionTimeout())
 	defer cancel()
 
+	localPeer, err := s.DIDDocument.GetID()
+	if err != nil {
+		return nil, contractworkflowengine.MakeInternalError(err)
+	}
+
 	qry := contract.GetByIDQry{
 		DID:         req.Did,
 		RetrievedBy: middleware.GetParticipantID(ctx),
 		HolderDID:   middleware.GetHolderDID(ctx),
 		UserRoles:   middleware.GetUserRoles(ctx),
+		LocalPeer:   localPeer,
 	}
 	qryHandler := contract.GetByIDHandler{
 		Ctx:   ctx,
@@ -488,7 +496,10 @@ func (s *contractWorkflowEnginesrvc) RetrieveByID(ctx context.Context, req *cont
 	}
 	contractResult, err := qryHandler.Handle(ctx, qry)
 	if err != nil {
-		return nil, templaterepository.MakeInternalError(err)
+		if errors.Is(err, contract.ErrContractAccessDenied) {
+			return nil, contractworkflowengine.MakeForbidden(err)
+		}
+		return nil, contractworkflowengine.MakeInternalError(err)
 	}
 
 	negotiations := make(map[string]*contractworkflowengine.ContractNegotiationItem)
@@ -537,26 +548,74 @@ func (s *contractWorkflowEnginesrvc) RetrieveByID(ctx context.Context, req *cont
 		return nil, contractworkflowengine.MakeInternalError(err)
 	}
 
+	extrinsic := string(contractstate.InferExtrinsic(contractResult.State.String()))
 	return &contractworkflowengine.ContractRetrieveByIDResponse{
-		Did:             contractResult.DID,
-		ContractVersion: contractResult.ContractVersion,
-		State:           contractResult.State.String(),
-		Name:            contractResult.Name,
-		Description:     contractResult.Description,
-		CreatedBy:       contractResult.CreatedBy,
-		CreatedAt:       contractResult.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:       contractResult.UpdatedAt.Format(time.RFC3339),
-		ContractData:    contractResult.ContractData,
-		TemplateDid:     contractResult.TemplateDID,
-		TemplateVersion: contractResult.TemplateVersion,
-		Negotiations:    negotiationList,
-		StartDate:       startDate,
-		ExpDate:         expDate,
-		ExpPolicy:       expPolicy,
-		ExpNoticePeriod: contractResult.ExpNoticePeriod,
-		Responsible:     contractResult.Responsible,
-		Kpis:            kpis,
-		KpiViolations:   kpiViolations,
+		Did:                contractResult.DID,
+		ContractVersion:    contractResult.ContractVersion,
+		State:              contractResult.State.String(),
+		ExtrinsicLifecycle: &extrinsic,
+		Name:               contractResult.Name,
+		Description:        contractResult.Description,
+		CreatedBy:          contractResult.CreatedBy,
+		CreatedAt:          contractResult.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:          contractResult.UpdatedAt.Format(time.RFC3339),
+		ContractData:       contractResult.ContractData,
+		TemplateDid:        contractResult.TemplateDID,
+		TemplateVersion:    contractResult.TemplateVersion,
+		Negotiations:       negotiationList,
+		StartDate:          startDate,
+		ExpDate:            expDate,
+		ExpPolicy:          expPolicy,
+		ExpNoticePeriod:    contractResult.ExpNoticePeriod,
+		Responsible:        contractResult.Responsible,
+		Kpis:               kpis,
+		KpiViolations:      kpiViolations,
+	}, nil
+}
+
+// KpiObservations serves the reported KPI values as a JSON-LD observation
+// set: dcs:KPIObservation nodes anchored to the Semantic Hub's versioned
+// context, each naming the observed metric, value, time, violation
+// verdict, and the contract it observes (DCS-FR-CWE-09/-31).
+func (s *contractWorkflowEnginesrvc) KpiObservations(ctx context.Context, req *contractworkflowengine.ContractRetrieveByIDRequest) (any, error) {
+	ctx, cancel := context.WithTimeout(ctx, conf.TransactionTimeout())
+	defer cancel()
+
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, contractworkflowengine.MakeInternalError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	entries, err := s.DeploymentRepo.ReadKPIsByDID(ctx, tx, req.Did)
+	if err != nil {
+		return nil, contractworkflowengine.MakeInternalError(fmt.Errorf("could not read KPIs for contract %s: %w", req.Did, err))
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, contractworkflowengine.MakeInternalError(err)
+	}
+
+	contextVersion, err := semantichub.ActiveVersion(ctx, s.DB, semantichub.ContextName, "context")
+	if err != nil {
+		return nil, contractworkflowengine.MakeInternalError(fmt.Errorf("load active hub context version: %w", err))
+	}
+
+	observations := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		observations = append(observations, map[string]any{
+			"@id":               fmt.Sprintf("%s#kpi-%d", base.ResourceIRI("contract", req.Did), entry.ID),
+			"@type":             "dcs:KPIObservation",
+			"dcs:metricName":    entry.Metric,
+			"dcs:observedValue": entry.Value,
+			"dcs:observedAt":    entry.ObservedAt.Format(time.RFC3339),
+			"dcs:violation":     entry.Violation,
+			"dcs:aboutContract": map[string]any{"@id": base.ResourceIRI("contract", req.Did)},
+		})
+	}
+	return map[string]any{
+		"@context":        semantichub.AnchorURL("context", semantichub.ContextName, contextVersion),
+		"@id":             req.Did + "#kpi-observations",
+		"@type":           "dcs:KPIObservationSet",
+		"dcs:observation": observations,
 	}, nil
 }
 
@@ -739,7 +798,7 @@ func (s *contractWorkflowEnginesrvc) Respond(ctx context.Context, req *contractw
 
 	actionFlag, err := negotiationactionflag.NewNegotiationActionFlag(req.ActionFlag)
 	if err != nil {
-		return nil, contractworkflowengine.MakeInternalError(fmt.Errorf("unknown action flag: %s", req.ActionFlag))
+		return nil, contractworkflowengine.MakeBadRequest(fmt.Errorf("unknown action flag: %s (expected ACCEPTING | REJECTING)", req.ActionFlag))
 	}
 
 	localPeer, err := s.DIDDocument.GetID()
@@ -1073,6 +1132,74 @@ func (s *contractWorkflowEnginesrvc) Terminate(ctx context.Context, req *contrac
 	}, nil
 }
 
+func (s *contractWorkflowEnginesrvc) Renew(ctx context.Context, req *contractworkflowengine.ContractRenewRequest) (res *contractworkflowengine.ContractRenewResponse, err error) {
+
+	err = s.DIDDocument.VerifyEIDASCertificate(s.TrustPool)
+	if err != nil {
+		return nil, contractworkflowengine.MakeBadRequest(err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, conf.TransactionTimeout())
+	defer cancel()
+
+	updatedAt, err := time.Parse(time.RFC3339, req.UpdatedAt)
+	if err != nil {
+		return nil, contractworkflowengine.MakeInternalError(err)
+	}
+
+	did, err := base.GenerateID()
+	if err != nil {
+		return nil, contractworkflowengine.MakeInternalError(err)
+	}
+
+	var newStartDate, newExpDate *time.Time
+	if req.NewStartDate != nil {
+		parsed, err := time.Parse(time.RFC3339, *req.NewStartDate)
+		if err != nil {
+			return nil, contractworkflowengine.MakeBadRequest(err)
+		}
+		newStartDate = &parsed
+	}
+	if req.NewExpDate != nil {
+		parsed, err := time.Parse(time.RFC3339, *req.NewExpDate)
+		if err != nil {
+			return nil, contractworkflowengine.MakeBadRequest(err)
+		}
+		newExpDate = &parsed
+	}
+
+	cmd := command.RenewCmd{
+		DID:                *did,
+		OriginalDID:        req.Did,
+		RenewedBy:          middleware.GetParticipantID(ctx),
+		HolderDID:          middleware.GetHolderDID(ctx),
+		UserRoles:          middleware.GetUserRoles(ctx),
+		UpdatedAt:          updatedAt,
+		NewStartDate:       newStartDate,
+		NewExpDate:         newExpDate,
+		NewExpPolicy:       req.NewExpPolicy,
+		NewExpNoticePeriod: req.NewExpNoticePeriod,
+	}
+	handler := command.Renewer{
+		DB:          s.DB,
+		CRepo:       s.CRepo,
+		RTRepo:      s.RTRepo,
+		ATRepo:      s.ATRepo,
+		NTRepo:      s.NTRepo,
+		DIDDocument: s.DIDDocument,
+	}
+	result, err := handler.Handle(ctx, cmd)
+	if err != nil {
+		return nil, mapContractCommandError(err)
+	}
+
+	return &contractworkflowengine.ContractRenewResponse{
+		Did:                   *did,
+		RenewsDid:             req.Did,
+		RenewsContractVersion: result.OriginalContractVersion,
+	}, nil
+}
+
 func (s *contractWorkflowEnginesrvc) Offer(ctx context.Context, req *contractworkflowengine.ContractOfferRequest) (res *contractworkflowengine.ContractOfferResponse, err error) {
 
 	err = s.DIDDocument.VerifyEIDASCertificate(s.TrustPool)
@@ -1332,4 +1459,15 @@ func (s *contractWorkflowEnginesrvc) DeploymentCallback(ctx context.Context, req
 		Did:    req.Did,
 		Status: &status,
 	}, nil
+}
+
+// Resolve dereferences a contract's resource IRI: GET /contract/{did}
+// serves the canonical JSON-LD contract document, under the same party
+// read authorization retrieve_by_id enforces.
+func (s *contractWorkflowEnginesrvc) Resolve(ctx context.Context, req *contractworkflowengine.ContractRetrieveByIDRequest) (any, error) {
+	contract, err := s.RetrieveByID(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return contract.ContractData, nil
 }
