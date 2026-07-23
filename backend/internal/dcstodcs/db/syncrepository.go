@@ -1,6 +1,6 @@
-// Package db holds the repository interface backing dcstodcs's trust
-// allowlist (TrustedPeer) and its retry queue for failed peer broadcasts
-// (SyncFail); db/pg holds the Postgres implementation.
+// Package db holds the repository interface backing dcstodcs's retry queue
+// for failed peer broadcasts (SyncFail) and its cross-instance sync
+// provenance store; db/pg holds the Postgres implementation.
 package db
 
 import (
@@ -10,16 +10,17 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-type TrustedPeer struct {
-	PeerDID string `db:"peer_did"`
-}
-
 type SyncFail struct {
 	ID          uint64    `db:"id"`
 	DID         string    `db:"did"`
 	RetryCount  int       `db:"retry_count"`
 	CreatedAt   time.Time `db:"created_at"`
 	LastTriedAt time.Time `db:"last_tried_at"`
+	// GateIncidentRecorded mirrors sync_fails.gate_incident_recorded (see
+	// CreateOrUpdateSyncFailEntry) — read here only so GetPendingSyncFails'
+	// `SELECT *` has a destination for every column; the retry scheduler
+	// itself does not need to inspect it.
+	GateIncidentRecorded bool `db:"gate_incident_recorded"`
 }
 
 // SyncSignature is the origin peer's JAdES signature over a synced
@@ -34,11 +35,16 @@ type SyncSignature struct {
 }
 
 type SyncRepository interface {
-	IsTrustedPeer(ctx context.Context, tx *sqlx.Tx, peerDID string) (bool, error)
-	UpsertTrustedPeer(ctx context.Context, tx *sqlx.Tx, peerDID string) error
-
 	GetPendingSyncFails(ctx context.Context, tx *sqlx.Tx) ([]SyncFail, error)
-	CreateOrUpdateSyncFailEntry(ctx context.Context, tx *sqlx.Tx, did string) error
+	// CreateOrUpdateSyncFailEntry upserts a sync_fails entry for did.
+	// isGateFailure marks this particular attempt as caused by the ADR-18
+	// trust gate's agreement-credential check (as opposed to e.g. the PDF not
+	// being stored yet); shouldRecordIncident reports whether THIS call is
+	// the first one to observe a gate failure for this entry — true at most
+	// once per entry, regardless of how many non-gate-failure or repeat
+	// gate-failure retries created/touched it before or after. The caller
+	// uses this to record a trust-gate denial incident exactly once.
+	CreateOrUpdateSyncFailEntry(ctx context.Context, tx *sqlx.Tx, did string, isGateFailure bool) (shouldRecordIncident bool, err error)
 	DeleteSyncFailEntry(ctx context.Context, tx *sqlx.Tx, peerDID string) error
 
 	// UpsertSyncSignature stores the latest verified JAdES signature received

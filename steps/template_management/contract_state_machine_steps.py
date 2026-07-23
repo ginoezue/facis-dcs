@@ -424,9 +424,10 @@ def step_given_expiry_date_in_past(context, name):
     in the future") and only accepts EventUpdate from Draft
     (Transitions[Draft][EventUpdate]) — a real 24h+ wait is not practical
     inside an automated BDD run. This mirrors the already-accepted
-    precedent in steps/peer_trust/dcs_peer_trust_steps.py's
-    `_seed_trusted_peer` (a direct context.db seam for a precondition the
-    API itself has no fast path to establish).
+    precedent of a direct context.db seam for a precondition the API itself
+    has no fast path to establish, also used (read-only, for assertions
+    rather than seeding) by steps/peer_trust/dcs_trust_pdp_steps.py's
+    `sync_fails` polling (ADR-18).
 
     This step does NOT itself flip the contract's `state` to EXPIRED — that
     remains the job of the already-running expiry cron

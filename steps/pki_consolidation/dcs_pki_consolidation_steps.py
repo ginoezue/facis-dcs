@@ -250,9 +250,13 @@ def step_then_cose_alg_is_es256(context):
 #
 # The Given step below seeds the revocation marker (the `cert_revoked_at`
 # column on `contract_signatures`) directly via context.db, mirroring the
-# accepted `_seed_trusted_peer` (steps/peer_trust/dcs_peer_trust_steps.py)
-# and exp_date-backdating (steps/template_management/
-# contract_state_machine_steps.py) precedents for test-only DB seams. The
+# accepted precedent of direct-DB test seams also used by exp_date-backdating
+# (steps/template_management/contract_state_machine_steps.py) and, on the
+# read-only assertion side, the `sync_fails` polling in
+# steps/peer_trust/dcs_trust_pdp_steps.py (ADR-18). The peer-trust package's
+# OWN former DB-seeding seam (`_seed_trusted_peer`, an `INSERT INTO
+# trusted_peers`) was removed when that package moved to ADR-18's
+# agreement-credential/PDP model — trust is no longer a seedable DB row. The
 # Then assertions on /signature/validate are the requirement-accurate,
 # load-bearing part.
 # ---------------------------------------------------------------------------

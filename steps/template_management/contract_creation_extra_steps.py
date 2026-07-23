@@ -17,6 +17,16 @@ backend change was needed for these scenarios: "authorized party" is
 represented by this instance's own peer DID (always trivially trusted),
 "unauthorized party" by a synthetic did:web DID that is guaranteed not to be
 a trusted peer.
+
+NOTE (ADR-18, docs/adr-18-federation-agreement-credential.md): this
+allowlist mechanism is slated for removal, replaced by a self-signed
+agreement credential + local policy endpoint (PDP) model — see
+steps/peer_trust/dcs_peer_trust_steps.py and
+steps/peer_trust/dcs_trust_pdp_steps.py. That removal has not landed yet, so
+the scenarios in this file remain valid against the current backend; they
+are a different requirement (creation-time party authorization, FR-CWE-18)
+than ADR-18's DCS-to-DCS shipping gate and were left as-is here rather than
+migrated speculatively ahead of the actual removal.
 """
 
 import json

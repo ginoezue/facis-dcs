@@ -8,9 +8,9 @@
 // pool (VerifyEIDASCertificate); (2) a per-request challenge-response
 // signature proving possession of the private key (Sign/Verify), used
 // instead of a shared token since there is no common auth authority across
-// operators; and (3) a local trusted-peer allowlist enforced by callers
-// (see dcstodcs.CheckForUntrustedPeers), which is deliberately not part of
-// this package.
+// operators; and (3) the federation trust gate — a self-signed agreement
+// credential plus a local policy endpoint (see dcstodcs.TrustGate, ADR-18) —
+// which is deliberately not part of this package.
 package identity
 
 import (
@@ -33,6 +33,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 // eIDAS / ETSI EN 319 412-5 OIDs
@@ -330,10 +331,18 @@ func (d *DIDDocument) loadCertificateChain() ([]*x509.Certificate, error) {
 	return certs, nil
 }
 
+// fetchTimeout bounds every outbound fetch this file makes (a peer's
+// did.json, or an x5c chain entry fetched by URL): http.DefaultClient has no
+// timeout, so a peer that accepts the connection and never responds would
+// otherwise hang the caller (PostPdf's inbound verification, the outbound
+// trust gate's did.json fetch) indefinitely instead of failing.
+var fetchTimeout = 10 * time.Second
+var fetchClient = &http.Client{Timeout: fetchTimeout}
+
 // fetchCertificateDER fetches a certificate from a URL and returns it as
 // DER. The server may deliver PEM or raw DER.
 func fetchCertificateDER(certURL string) ([]byte, error) {
-	resp, err := http.Get(certURL)
+	resp, err := fetchClient.Get(certURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetching certificate from %s: %w", certURL, err)
 	}
@@ -448,7 +457,7 @@ func DIDWebToHostname(did string) (string, error) {
 }
 
 func fetchDIDDocumentFromURL(url string) (*DIDDocument, error) {
-	resp, err := http.Get(url)
+	resp, err := fetchClient.Get(url)
 	if err != nil {
 		return nil, err
 	}

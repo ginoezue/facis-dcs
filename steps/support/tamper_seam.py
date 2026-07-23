@@ -15,11 +15,11 @@ overwritten in place; the seam is instead:
   1. Add the tampered/stripped bytes as a NEW CID, via `ipfs add` exec'd
      inside the shared in-cluster IPFS pod (see _ipfs_exec_prefix below).
   2. Point `contracts.pdf_ipfs_cid` at that new CID, via the existing
-     `context.db` test-DB connection (see environment.py and the
-     `_seed_trusted_peer` precedent in
-     steps/peer_trust/dcs_peer_trust_steps.py) — a direct Postgres
-     connection is already an accepted test-only seam in this codebase,
-     preferred here over a second kubectl-exec-into-postgres seam.
+     `context.db` test-DB connection (see environment.py) — a direct
+     Postgres connection is already an accepted test-only seam in this
+     codebase (also used, read-only, by steps/peer_trust/
+     dcs_trust_pdp_steps.py's `sync_fails` polling under ADR-18), preferred
+     here over a second kubectl-exec-into-postgres seam.
 
 This is a genuine black-box test target afterwards: the verify/validate
 endpoints under test do not know or care that the CID was swapped by a test

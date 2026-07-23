@@ -13,7 +13,7 @@ import (
 	"digital-contracting-service/internal/base/identity"
 	"digital-contracting-service/internal/base/ipfs"
 
-	trustedpeer "digital-contracting-service/internal/dcstodcs"
+	trustgate "digital-contracting-service/internal/dcstodcs"
 
 	"digital-contracting-service/internal/contractworkflowengine/command"
 
@@ -43,6 +43,7 @@ type dcsToDcssrvc struct {
 	TrustPool   *identity.EUTrustPool
 	IPFSClient  *ipfs.APIClient
 	PDFCore     *pdfcore.Client
+	TrustGate   trustgate.TrustGate
 	auth.JWTAuthenticator
 }
 
@@ -50,7 +51,7 @@ func NewDcsToDcs(db *sqlx.DB, jwtAuth auth.JWTAuthenticator,
 	cRepo db.ContractRepo, rtRepo db.ReviewTaskRepo, atRepo db.ApprovalTaskRepo,
 	ntRepo db.NegotiationTaskRepo, nRepo db.NegotiationRepo, ctRepo db.ContractTemplateRepo, syncRepo db2.SyncRepository,
 	trustPool *identity.EUTrustPool,
-	didDocument identity.DIDDocument, ipfsClient *ipfs.APIClient, pdfCore *pdfcore.Client) dcstodcs.Service {
+	didDocument identity.DIDDocument, ipfsClient *ipfs.APIClient, pdfCore *pdfcore.Client, trustGate trustgate.TrustGate) dcstodcs.Service {
 
 	return &dcsToDcssrvc{
 		JWTAuthenticator: jwtAuth,
@@ -66,6 +67,7 @@ func NewDcsToDcs(db *sqlx.DB, jwtAuth auth.JWTAuthenticator,
 		TrustPool:        trustPool,
 		IPFSClient:       ipfsClient,
 		PDFCore:          pdfCore,
+		TrustGate:        trustGate,
 	}
 }
 
@@ -96,13 +98,21 @@ func (s *dcsToDcssrvc) PostPdf(ctx context.Context, req *dcstodcs.DCSToDCSContra
 	if req.FromPeerDid == localPeer {
 		return nil, contractworkflowengine.MakeBadRequest(errors.New("shipping a contract PDF to the same peer is not allowed"))
 	}
-	untrustedPeers, err := trustedpeer.CheckForUntrustedPeers(ctx, s.DB, s.SRepo, localPeer, []string{req.FromPeerDid})
-	if err != nil {
-		return nil, contractworkflowengine.MakeInternalError(err)
-	}
-	if len(untrustedPeers) > 0 {
+
+	// Federation trust gate (ADR-18): the peer's self-signed agreement
+	// credential must verify against its own did.json's dedicated VC key and
+	// name this instance's own embedded federation rules hash (layer 3a), and
+	// this instance's own local policy endpoint must allow the interaction
+	// (layer 3b). Any rejection is recorded as an incident in the audit trail.
+	if err := s.TrustGate.Check(ctx, req.FromPeerDid, trustgate.Inbound, req.ContractIri, ""); err != nil {
+		var gateErr *trustgate.GateError
+		if errors.As(err, &gateErr) {
+			if incidentErr := trustgate.RecordDenialIncident(ctx, s.DB, req.ContractIri, trustgate.Inbound, gateErr); incidentErr != nil {
+				log.Printf(ctx, "could not record trust gate denial incident for %s: %v", req.ContractIri, incidentErr)
+			}
+		}
 		return nil, contractworkflowengine.MakeBadRequest(
-			fmt.Errorf("post_pdf rejected: peer %s is not in the trusted_peers allowlist", req.FromPeerDid))
+			fmt.Errorf("post_pdf rejected: peer %s does not pass the federation trust gate: %w", req.FromPeerDid, err))
 	}
 
 	// Legal gate: the received PDF's human-readable page content MUST be the

@@ -125,24 +125,15 @@ func (s *contractWorkflowEnginesrvc) Create(ctx context.Context, req *contractwo
 		return nil, contractworkflowengine.MakeInternalError(err)
 	}
 
-	localPeer, err := s.DIDDocument.GetID()
-	if err != nil {
-		return nil, contractworkflowengine.MakeInternalError(err)
-	}
-
 	counterparty := ""
 	if req.Counterparty != nil {
 		counterparty = *req.Counterparty
 	}
-	if counterparty != "" {
-		untrustedPeers, err := dcstodcs.CheckForUntrustedPeers(ctx, s.DB, s.SRepo, localPeer, []string{counterparty})
-		if err != nil {
-			return nil, contractworkflowengine.MakeInternalError(err)
-		}
-		if len(untrustedPeers) > 0 {
-			return nil, contractworkflowengine.MakeBadRequest(fmt.Errorf("untrusted counterparty is not allowed: %v", untrustedPeers))
-		}
-	}
+	// A counterparty is not vetted at creation time (ADR-18): the federation
+	// trust gate — agreement credential + local policy endpoint — is
+	// consulted once, on the actual ship attempt (dcstodcs.DCSToDCSSynchronizer.
+	// shipContractPDF), so a denial surfaces as a sync_fails/incident there,
+	// not as a create-time rejection.
 
 	cmd := command.CreateCmd{
 		DID:          *did,

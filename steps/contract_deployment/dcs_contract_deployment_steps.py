@@ -50,8 +50,9 @@ callback chain. Forcing `state='ACTIVE'` directly via the shared test DB
 connection (context.db, see environment.py) isolates the behavior under
 test (archived must not be treated as inactive) from the deploy mechanism,
 which the other scenarios exercise directly. This mirrors the accepted
-precedent of direct-DB seams for preconditions the API has no fast/existing
-path to establish (steps/peer_trust's `_seed_trusted_peer`,
+precedent of direct-DB seams for preconditions/assertions the API has no
+fast/existing path to establish or observe (steps/peer_trust/
+dcs_trust_pdp_steps.py's read-only `sync_fails` polling — ADR-18 — and
 steps/template_management/contract_state_machine_steps's exp_date
 backdate).
 

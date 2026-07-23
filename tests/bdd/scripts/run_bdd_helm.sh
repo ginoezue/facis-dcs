@@ -371,6 +371,11 @@ export BDD_ORCE_ARCHIVE_AUDIT_LOG_BEARER_TOKEN="$ORCE_TOKEN"
 export BDD_ORCE_NAMESPACE="$K8S_NAMESPACE"
 export BDD_ORCE_DEPLOYMENT="$ORCE_DEPLOYMENT"
 export BDD_KUBECTL="$KUBECTL_BIN"
+# ADR-18 trust gate: both DCS instances point their DCS_TRUST_PDP_URL at the
+# controllable ORCE trust-pdp flow; the steps steer it (allow/deny/silent)
+# and read back the last captured request through this same port-forward.
+export BDD_TRUST_PDP_CONTROL_URL="http://localhost:${ORCE_LOCAL_FORWARD_PORT}"
+export BDD_TRUST_PDP_DEFAULT_FLOW_WIRED=1
 
 echo "Waiting for authenticated ORCE archive audit-log endpoint"
 deadline=$(( $(date +%s) + 60 ))

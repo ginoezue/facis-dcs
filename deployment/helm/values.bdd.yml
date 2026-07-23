@@ -39,12 +39,13 @@ extraEnv:
     value: "true"
   - name: AUTH_INSECURE_COOKIES
     value: "true"
-  # Reciprocal trust for the @two-instance peer-trust scenarios
-  # (features/17_peer_trust): instance B's DID (see values.bdd2.yml's own
-  # DCS_TRUSTED_PEERS for the other half of this pair). Seeded at startup by
-  # backend/cmd/dcs/main.go's seedTrustedPeersFromEnv.
-  - name: DCS_TRUSTED_PEERS
-    value: "did:web:dcs-b.localhost%3A18080"
+  # Federation trust gate (ADR-18): the local policy endpoint every inbound
+  # and outbound interaction is consulted against, fail-closed. Points at the
+  # bootstrap 200-OK Node-RED flow (deployment/helm/charts/orce/flows/
+  # trust-pdp-flow.json), shared with instance B (values.bdd2.yml has no own
+  # orce release).
+  - name: DCS_TRUST_PDP_URL
+    value: "http://dcs-orce:1880/trust-pdp"
   # DB-backed sync-fail retry cadence (conf.SyncFailCronJobTimeOut). The prod
   # default is minutes; BDD/e2e run it fast so a peer PDF ship that fires before
   # the async regenerator stored the CID (or that transiently failed) is
@@ -126,6 +127,15 @@ ingress:
         # /.well-known prefix for OIDC discovery, and the longer path wins.
         - path: /.well-known/did.json
           pathType: Prefix
+        # Federation trust gate (ADR-18): the agreement credential and the
+        # rules document it names both resolve via the same did:web-hostname
+        # logic as did.json (identity.FetchDIDDocumentFromHostname's sibling
+        # in dcstodcs/trustgate.go) — routed at the origin root for the same
+        # reason as did.json above.
+        - path: /.well-known/dcs-agreement-credential.json
+          pathType: Prefix
+        - path: /.well-known/dcs-federation-rules.md
+          pathType: Prefix
         # Webhook platform (DCS-FR-TR-22 template-update notifications):
         # backend/cmd/dcs/http.go mounts it at /orce/ on the service root,
         # outside DCS_API_PATH, so subscribers need it routed explicitly.
@@ -143,6 +153,10 @@ ingress:
         - path: /digital-contracting-service
           pathType: Prefix
         - path: /.well-known/did.json
+          pathType: Prefix
+        - path: /.well-known/dcs-agreement-credential.json
+          pathType: Prefix
+        - path: /.well-known/dcs-federation-rules.md
           pathType: Prefix
         - path: /orce
           pathType: Prefix

@@ -4,7 +4,8 @@
     "https://w3id.org/security/suites/jws-2020/v1"
   ],
   "assertionMethod": [
-    "did:web:localhost%3A8991#dev-key-1"
+    "did:web:localhost%3A8991#dev-key-1",
+    "did:web:localhost%3A8991#dcs-vc"
   ],
   "id": "did:web:localhost%3A8991",
   "services": [
@@ -23,11 +24,27 @@
         "crv": "P-256",
         "kid": "dev-key-1",
         "kty": "EC",
-        "x": "NewrGpZ5XHYfWCeVjZ51NUP0LhK33oPaGEnoipX7788",
+        "x": "a7HTRNXyRcvjwUZvnBZ_c3vmoG_81Yh89vMNLRC4T40",
         "x5c": [
-          "MIIBrTCCAVOgAwIBAgIIGMM5TpBamI8wCgYIKoZIzj0EAwIwODELMAkGA1UEBhMCREUxEDAOBgNVBAoTB0RDUyBEZXYxFzAVBgNVBAMTDmxvY2FsaG9zdDo4OTkxMB4XDTI2MDcxNzIzMDEyNloXDTI4MDcxODAwMDEyNlowODELMAkGA1UEBhMCREUxEDAOBgNVBAoTB0RDUyBEZXYxFzAVBgNVBAMTDmxvY2FsaG9zdDo4OTkxMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENewrGpZ5XHYfWCeVjZ51NUP0LhK33oPaGEnoipX77895Gbmo9Pd9xPofk3cD4LxHbYp1IFIphuNvkBgvLptKzqNHMEUwDgYDVR0PAQH/BAQDAgeAMA8GA1UdJQQIMAYGBFUdJQAwDAYDVR0TAQH/BAIwADAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSAAwRQIgVmmUrJLR1k5vVhEScmKVyHsnjbw9s9NEmQz3l+231qsCIQDZHTgRqWaFX/2/KH9PZpHaA+uZOAhhXWdMd/xz/czEsA=="
+          "MIIBrTCCAVOgAwIBAgIIGMSrfHQE7qowCgYIKoZIzj0EAwIwODELMAkGA1UEBhMCREUxEDAOBgNVBAoTB0RDUyBEZXYxFzAVBgNVBAMTDmxvY2FsaG9zdDo4OTkxMB4XDTI2MDcyMjE2MDUwM1oXDTI4MDcyMjE3MDUwM1owODELMAkGA1UEBhMCREUxEDAOBgNVBAoTB0RDUyBEZXYxFzAVBgNVBAMTDmxvY2FsaG9zdDo4OTkxMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEa7HTRNXyRcvjwUZvnBZ/c3vmoG/81Yh89vMNLRC4T43Zu1eTu3i7X47h2SqjGo4hKNX2tb79hVfvAUES3zfK+6NHMEUwDgYDVR0PAQH/BAQDAgeAMA8GA1UdJQQIMAYGBFUdJQAwDAYDVR0TAQH/BAIwADAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSAAwRQIhALjtw4JplllRHDdCAMB3nVsW3vMjBXsEd8OVCXf6fpzqAiBYQkpS1Dkw6PLIPkmuL9DUY6KieCj30+X/RoBbGm8Nog=="
         ],
-        "y": "eRm5qPT3fcT6H5N3A-C8R22KdSBSKYbjb5AYLy6bSs4"
+        "y": "2btXk7t4u1-O4dkqoxqOISjV9rW-_YVX7wFBEt83yvs"
+      },
+      "type": "JsonWebKey2020"
+    },
+    {
+      "controller": "did:web:localhost%3A8991",
+      "id": "did:web:localhost%3A8991#dcs-vc",
+      "publicKeyJwk": {
+        "alg": "ES256",
+        "crv": "P-256",
+        "kid": "dcs-vc",
+        "kty": "EC",
+        "x": "fUGQwq5AgSglZZBdPPJ-ML9j3yCtrplSZtL9FKIHWMc",
+        "x5c": [
+          "MIIBrTCCAVOgAwIBAgIIGMSrfHQyYMMwCgYIKoZIzj0EAwIwODELMAkGA1UEBhMCREUxEDAOBgNVBAoTB0RDUyBEZXYxFzAVBgNVBAMTDmxvY2FsaG9zdDo4OTkxMB4XDTI2MDcyMjE2MDUwM1oXDTI4MDcyMjE3MDUwM1owODELMAkGA1UEBhMCREUxEDAOBgNVBAoTB0RDUyBEZXYxFzAVBgNVBAMTDmxvY2FsaG9zdDo4OTkxMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUGQwq5AgSglZZBdPPJ+ML9j3yCtrplSZtL9FKIHWMeXgfGyz0RHAXzeBnDr9b826jx/bWRTKbqkIv0TzDeXOKNHMEUwDgYDVR0PAQH/BAQDAgeAMA8GA1UdJQQIMAYGBFUdJQAwDAYDVR0TAQH/BAIwADAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSAAwRQIhAIjxby69bhMbQkwklqdSo8vhySsO2Z+oEUtghJIMK+KVAiAQ0klwZI7vYM92msbPKLp9vSdKF2HguQVg7uJtu00rBQ=="
+        ],
+        "y": "l4Hxss9ERwF83gZw6_W_Nuo8f21kUym6pCL9E8w3lzg"
       },
       "type": "JsonWebKey2020"
     }

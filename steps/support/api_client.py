@@ -21,6 +21,13 @@ def did_document_url(base_url: str) -> str:
     return f"{origin_url(base_url)}/.well-known/did.json"
 
 
+def agreement_credential_url(base_url: str) -> str:
+    """The federation agreement credential (ADR-18): a self-signed W3C VC,
+    published next to did.json at the bare origin root for the same reason
+    (did:web-style well-known resolution, no route.basePath prefix)."""
+    return f"{origin_url(base_url)}/.well-known/dcs-agreement-credential.json"
+
+
 # URL builders
 
 def contract_create_url(context) -> str:
@@ -143,6 +150,21 @@ def contract_peer_action_url(context) -> str:
 
 def contract_peer_post_sync_url(context) -> str:
     return f"{context.base_url}/peer/contracts/"
+
+
+def contract_peer_pdf_url(context) -> str:
+    """POST /peer/contracts/pdf (post_pdf, backend/design/dcs_to_dcs.go): the
+    CURRENT DCS-to-DCS receiving endpoint (ADR-13's PDF-shipping model). The
+    older contract_peer_post_sync_url / contract_peer_action_url above target
+    a full-JSON-state-sync shape that predates ADR-13 and no longer exists in
+    the Goa design — kept as-is here since fixing that drift is outside
+    ADR-18's scope, but new agreement-credential (ADR-18) scenarios must
+    target this endpoint instead."""
+    return f"{context.base_url}/peer/contracts/pdf"
+
+
+def contract_peer_provenance_url(context) -> str:
+    return f"{context.base_url}/peer/contracts/provenance"
 
 
 def signature_prepare_url(context) -> str:

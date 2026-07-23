@@ -61,6 +61,18 @@ class ContractService:
         contract_workflow_engine.go Create()) accepts it as a
         reviewer/negotiator/approver DID.
 
+        NOTE (ADR-18, docs/adr-18-federation-agreement-credential.md):
+        `CheckForUntrustedPeers` and the `trusted_peers` table/
+        `DCS_TRUSTED_PEERS` env var this helper depends on are slated for
+        removal, replaced by the agreement-credential + PDP model. As of
+        this writing that removal has not landed, so this helper and the
+        FR-CWE-18 party-authorization scenarios using it remain valid
+        against the current backend; they will need a PDP-stub-based
+        replacement (steps/peer_trust/dcs_trust_pdp_steps.py) once the
+        removal does land — out of this ADR-18 BDD pass's scope since it
+        covers a different requirement (contract-party authorization, not
+        DCS-to-DCS federation shipping).
+
         Used as a stand-in for "a different, legitimate party that is NOT
         this instance": registering it (instead of this instance's own DID,
         see _local_peer_did) as a contract's sole reviewer/negotiator/

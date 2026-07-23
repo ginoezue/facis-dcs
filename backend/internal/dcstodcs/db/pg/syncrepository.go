@@ -1,5 +1,5 @@
 // Package pq is the Postgres implementation of dcstodcs's sync repository
-// (trusted-peer allowlist + sync-fail retry queue).
+// (sync-fail retry queue + cross-instance sync provenance store).
 package pq
 
 import (
@@ -14,41 +14,35 @@ import (
 
 type PostgresSyncRepository struct{}
 
-func (r PostgresSyncRepository) IsTrustedPeer(ctx context.Context, tx *sqlx.Tx, peerDID string) (bool, error) {
-	var exists bool
-	query := `SELECT EXISTS(SELECT 1 FROM trusted_peers WHERE peer_did = $1)`
-	if err := tx.GetContext(ctx, &exists, query, peerDID); err != nil {
+// CreateOrUpdateSyncFailEntry upserts the retry entry and reports whether
+// THIS call is the first to observe a trust-gate failure for it.
+// gate_incident_recorded is a per-row latch: the "existing" CTE reads its
+// pre-upsert value from the same statement-start snapshot the INSERT/UPDATE
+// itself observes, so shouldRecordIncident is true exactly once — whether
+// the row is being freshly created by a gate failure, or already existed for
+// an unrelated reason (e.g. the PDF not being stored yet, isGateFailure
+// false) and only now, on a later retry, actually hits a gate failure.
+func (r PostgresSyncRepository) CreateOrUpdateSyncFailEntry(ctx context.Context, tx *sqlx.Tx, did string, isGateFailure bool) (bool, error) {
+	statement := `
+        WITH existing AS (
+            SELECT gate_incident_recorded FROM sync_fails WHERE did = $1
+        ), upsert AS (
+            INSERT INTO sync_fails (did, retry_count, created_at, last_tried_at, gate_incident_recorded)
+            VALUES ($1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $2)
+            ON CONFLICT (did) DO UPDATE SET
+                retry_count            = sync_fails.retry_count + 1,
+                last_tried_at          = CURRENT_TIMESTAMP,
+                gate_incident_recorded = sync_fails.gate_incident_recorded OR $2
+            RETURNING did
+        )
+        SELECT $2 AND NOT COALESCE((SELECT gate_incident_recorded FROM existing), FALSE)
+        FROM upsert
+    `
+	var shouldRecordIncident bool
+	if err := tx.GetContext(ctx, &shouldRecordIncident, statement, did, isGateFailure); err != nil {
 		return false, err
 	}
-	return exists, nil
-}
-
-// UpsertTrustedPeer idempotently seeds peerDID into the trusted_peers
-// allowlist (peer_did is the primary key, see
-// backend/migrations/sql/20260626_synchronization.sql) — used both by
-// startup seeding from DCS_TRUSTED_PEERS and, potentially,
-// future admin tooling. Mirrors CreateOrUpdateSyncFailEntry's
-// ON CONFLICT ... DO NOTHING idempotency pattern above.
-func (r PostgresSyncRepository) UpsertTrustedPeer(ctx context.Context, tx *sqlx.Tx, peerDID string) error {
-	statement := `
-        INSERT INTO trusted_peers (peer_did)
-        VALUES ($1)
-        ON CONFLICT (peer_did) DO NOTHING
-    `
-	_, err := tx.ExecContext(ctx, statement, peerDID)
-	return err
-}
-
-func (r PostgresSyncRepository) CreateOrUpdateSyncFailEntry(ctx context.Context, tx *sqlx.Tx, did string) error {
-	statement := `
-        INSERT INTO sync_fails (did, retry_count, created_at, last_tried_at)
-        VALUES ($1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ON CONFLICT (did) DO UPDATE SET
-            retry_count   = sync_fails.retry_count + 1,
-            last_tried_at = CURRENT_TIMESTAMP
-    `
-	_, err := tx.ExecContext(ctx, statement, did)
-	return err
+	return shouldRecordIncident, nil
 }
 
 func (r PostgresSyncRepository) DeleteSyncFailEntry(ctx context.Context, tx *sqlx.Tx, did string) error {

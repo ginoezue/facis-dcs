@@ -2,11 +2,11 @@
 // listens for the PDF-regenerated event (and the signature-applied event),
 // and ships the contract's PDF — the self-contained wire format carrying the
 // machine-readable JSON-LD, the C2PA provenance chain, and any signatures — to
-// the counterparty peer, resolving/verifying peer identity via did:web + eIDAS
-// (trustedpeercheck.go, base/identity) and retrying failed ships from the
-// sync_fails table. A signed contract additionally carries the JAdES
-// (DCS-FR-SM-02). No contract state or task ledger crosses the boundary: each
-// DCS runs its own workflow/RBAC (ADR-13).
+// the counterparty peer, gating every ship on the federation trust gate
+// (trustgate.go: agreement credential + local policy endpoint, ADR-18) and
+// retrying failed ships from the sync_fails table. A signed contract
+// additionally carries the JAdES (DCS-FR-SM-02). No contract state or task
+// ledger crosses the boundary: each DCS runs its own workflow/RBAC (ADR-13).
 package dcstodcs
 
 import (
@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"digital-contracting-service/internal/base/conf"
@@ -44,6 +43,7 @@ type DCSToDCSSynchronizer struct {
 	SRepo       db2.SyncRepository
 	IPFSClient  *ipfs.APIClient
 	DIDDocument identity.DIDDocument
+	TrustGate   TrustGate
 }
 
 // shippableStates are the contract states whose PDF is shipped to the
@@ -198,14 +198,10 @@ func (s *DCSToDCSSynchronizer) shipContractPDF(ctx context.Context, did string) 
 		// once the CID is written. A dropped ship with no record and no retry is
 		// a correctness bug, not merely a timing race.
 		return s.recordShipOutcome(ctx, did,
-			fmt.Errorf("contract %s is shippable but its PDF is not stored yet; deferring ship to the retry scheduler", did))
+			fmt.Errorf("contract %s is shippable but its PDF is not stored yet; deferring ship to the retry scheduler", did), nil)
 	}
 
 	recipients := contractData.Responsible.GetParties()
-	untrustedPeers, err := CheckForUntrustedPeers(ctx, s.DB, s.SRepo, localPeer, recipients)
-	if err != nil {
-		return err
-	}
 
 	pdfResult, err := s.IPFSClient.FetchFile(pdfState.IPFSCID)
 	if err != nil || len(pdfResult.Data) == 0 {
@@ -218,8 +214,52 @@ func (s *DCSToDCSSynchronizer) shipContractPDF(ctx context.Context, did string) 
 		return err
 	}
 
-	shipError := s.shipToPeers(ctx, localPeer, did, pdfBytes, jadesSignature, recipients, untrustedPeers)
-	return s.recordShipOutcome(ctx, did, shipError)
+	shipError := s.shipToPeers(ctx, localPeer, did, state, pdfBytes, jadesSignature, recipients)
+
+	var gateErr *GateError
+	if errors.As(shipError, &gateErr) && gateErr.Kind == PolicyFailure {
+		// Unified terminal semantics (ADR-18): a policy-endpoint denial —
+		// non-2xx, unset DCS_TRUST_PDP_URL, or unreachable — never gets a
+		// sync_fails retry entry, so every attempt is a genuinely new
+		// interaction, not a retry of the same denial: exactly one incident
+		// per attempt (contrast the agreement-credential dedup below). Any
+		// sync_fails row a PRIOR, unrelated failure left behind (e.g. the
+		// "PDF not stored yet" deferral, which runs before the trust gate is
+		// even consulted) must be cleared here too — otherwise the terminal
+		// PDP denial would still sit in the retry queue and keep getting
+		// re-attempted forever. Cleared atomically with the incident so a
+		// crash between the two can't leave one without the other.
+		if err := s.clearSyncFailWithIncident(ctx, did, gateErr); err != nil {
+			log.Printf(ctx, "could not clear sync fail entry / record trust gate denial incident for %s: %v", did, err)
+		}
+		return nil
+	}
+	return s.recordShipOutcome(ctx, did, shipError, gateErr)
+}
+
+// clearSyncFailWithIncident deletes any sync_fails retry entry for did and
+// records the terminal policy-endpoint denial incident in the same
+// transaction (ADR-18 AC10) — deduped per (did, peer, direction), since a
+// single offer's Offer and PDF_REGENERATED events each independently trigger
+// a ship attempt a few hundred ms apart and both can hit the same denial.
+func (s *DCSToDCSSynchronizer) clearSyncFailWithIncident(ctx context.Context, did string, gateErr *GateError) error {
+	tx, err := s.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("could not start transaction: %w", err)
+	}
+	defer func(tx *sqlx.Tx) {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			log.Printf(ctx, "could not rollback transaction: %v", err)
+		}
+	}(tx)
+
+	if err := s.SRepo.DeleteSyncFailEntry(ctx, tx, did); err != nil {
+		return fmt.Errorf("could not delete sync fail entry: %w", err)
+	}
+	if err := RecordDenialIncidentTxDeduped(ctx, tx, s.DB, did, Outbound, gateErr); err != nil {
+		return fmt.Errorf("could not record trust gate denial incident: %w", err)
+	}
+	return tx.Commit()
 }
 
 // jadesForSignedContract returns the JAdES a signed contract's ship carries, or
@@ -243,13 +283,13 @@ func (s *DCSToDCSSynchronizer) jadesForSignedContract(state string, contractData
 	return signature, nil
 }
 
-func (s *DCSToDCSSynchronizer) shipToPeers(ctx context.Context, localPeer, did string, pdfBytes []byte, jadesSignature string, recipients, untrustedPeers []string) error {
+func (s *DCSToDCSSynchronizer) shipToPeers(ctx context.Context, localPeer, did, state string, pdfBytes []byte, jadesSignature string, recipients []string) error {
 	for _, peer := range recipients {
 		if peer == localPeer {
 			continue
 		}
-		if slices.Contains(untrustedPeers, peer) {
-			return fmt.Errorf("shipping to untrusted peer %s is not allowed", peer)
+		if err := s.TrustGate.Check(ctx, peer, Outbound, did, state); err != nil {
+			return err
 		}
 		hostname, err := identity.DIDWebToHostname(peer)
 		if err != nil {
@@ -275,7 +315,17 @@ func (s *DCSToDCSSynchronizer) shipToPeers(ctx context.Context, localPeer, did s
 	return nil
 }
 
-func (s *DCSToDCSSynchronizer) recordShipOutcome(ctx context.Context, did string, shipError error) error {
+// recordShipOutcome persists a ship attempt's sync_fails side effect and,
+// for an agreement-credential trust-gate failure (gateErr != nil), records
+// exactly one incident for it. The sync_fails row this contract's ship
+// attempts share can be created for an UNRELATED reason first (e.g. the PDF
+// not being stored yet, gateErr == nil that time) and only turn into an
+// actual gate failure on a later retry — "was this call the one that
+// inserted the row" is therefore NOT the right dedup signal (it would miss
+// the incident entirely in that interleaving); CreateOrUpdateSyncFailEntry's
+// own gate_incident_recorded latch is, and it reports true at most once
+// per entry regardless of how many times gate failures do or don't recur.
+func (s *DCSToDCSSynchronizer) recordShipOutcome(ctx context.Context, did string, shipError error, gateErr *GateError) error {
 	tx, err := s.DB.BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("could not start transaction: %w", err)
@@ -286,8 +336,10 @@ func (s *DCSToDCSSynchronizer) recordShipOutcome(ctx context.Context, did string
 		}
 	}(tx)
 
+	shouldRecordIncident := false
 	if shipError != nil {
-		if err := s.SRepo.CreateOrUpdateSyncFailEntry(ctx, tx, did); err != nil {
+		shouldRecordIncident, err = s.SRepo.CreateOrUpdateSyncFailEntry(ctx, tx, did, gateErr != nil)
+		if err != nil {
 			return fmt.Errorf("could not create or update sync fail entry: %w", err)
 		}
 	} else if err := s.SRepo.DeleteSyncFailEntry(ctx, tx, did); err != nil {
@@ -295,6 +347,12 @@ func (s *DCSToDCSSynchronizer) recordShipOutcome(ctx context.Context, did string
 	}
 	if err := tx.Commit(); err != nil {
 		return err
+	}
+
+	if shouldRecordIncident && gateErr != nil {
+		if incidentErr := RecordDenialIncident(ctx, s.DB, did, Outbound, gateErr); incidentErr != nil {
+			log.Printf(ctx, "could not record trust gate denial incident for %s: %v", did, incidentErr)
+		}
 	}
 	return shipError
 }

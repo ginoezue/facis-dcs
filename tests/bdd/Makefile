@@ -120,13 +120,13 @@ setup_environment:
 	fi; \
 	"$(VENV_PATH)/bin/pip" install -q --upgrade pip wheel; \
 	"$(VENV_PATH)/bin/pip" install -q -e "$$SRC_PATH[dev]"; \
-	"$(VENV_PATH)/bin/pip" install -q psycopg2-binary jcs pypdf==5.7.0
+	"$(VENV_PATH)/bin/pip" install -q psycopg2-binary jcs pypdf==5.7.0 pyld
 	"$(VENV_PATH)/bin/pip" install -q -r "$(PROJECT_ROOT)/testWallet/requirements.txt"
 
 # Bootstrappt das venv nur, wenn es fehlt/kaputt ist — der pip-Refresh bei
 # jedem Lauf kostete sonst 10-60s pro Testzyklus.
 ensure_venv:
-	@"$(VENV_ABS)/bin/python" -c 'import eu.xfsc.bdd.core, pypdf' 2>/dev/null || \
+	@"$(VENV_ABS)/bin/python" -c 'import eu.xfsc.bdd.core, pypdf, pyld' 2>/dev/null || \
 		$(MAKE) setup_environment
 
 run_bdd_test: ensure_venv

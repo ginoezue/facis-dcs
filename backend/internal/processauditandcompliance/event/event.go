@@ -143,3 +143,28 @@ func (e IncidentReportEvent) EventType() string {
 func (e IncidentReportEvent) GetDID() string {
 	return e.DID
 }
+
+// TrustGateDenialEvent anchors one federation trust-gate rejection (ADR-18):
+// either the agreement-credential check (layer 3a: missing, unsigned, or a
+// federation-rules hash mismatch) or the local policy-endpoint check (layer
+// 3b: a non-2xx response, an unset DCS_TRUST_PDP_URL, or an unreachable
+// endpoint), on either the inbound (PostPdf) or outbound (shipContractPDF)
+// path. Anchored against the affected contract's PAC audit chain, mirroring
+// IncidentReportEvent's per-resource anchoring.
+type TrustGateDenialEvent struct {
+	DID        string    `json:"did"`
+	PeerDID    string    `json:"peer_did"`
+	Direction  string    `json:"direction"`
+	Reason     string    `json:"reason"`
+	OccurredAt time.Time `json:"occurred_at"`
+}
+
+// EventType implements the Event interface.
+func (e TrustGateDenialEvent) EventType() string {
+	return "PAC_TRUST_GATE_DENIAL"
+}
+
+// GetDID implements the Event interface.
+func (e TrustGateDenialEvent) GetDID() string {
+	return e.DID
+}

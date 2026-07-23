@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	dcstodcs2 "digital-contracting-service/internal/dcstodcs"
-	dcstodcsdb "digital-contracting-service/internal/dcstodcs/db"
 	pq2 "digital-contracting-service/internal/dcstodcs/db/pg"
 
 	didservice "digital-contracting-service/gen/did_service"
@@ -39,6 +37,7 @@ import (
 	"digital-contracting-service/internal/base/conf"
 	"digital-contracting-service/internal/base/db/pq"
 	"digital-contracting-service/internal/base/event"
+	"digital-contracting-service/internal/base/federation"
 	"digital-contracting-service/internal/base/hsm"
 	"digital-contracting-service/internal/base/identity"
 	"digital-contracting-service/internal/base/ipfs"
@@ -327,15 +326,17 @@ func main() {
 	}(cepSubClient)
 
 	syncRepo := pq2.PostgresSyncRepository{}
-	if err := seedTrustedPeersFromEnv(ctx, db, &syncRepo); err != nil {
-		log.Fatalf(ctx, err, "failed to seed trusted peers from DCS_TRUSTED_PEERS")
-	}
+	// Federation trust gate (ADR-18): agreement credential verification + the
+	// local policy endpoint, consulted on both the outbound (shipContractPDF,
+	// here) and inbound (PostPdf, service.NewDcsToDcs below) paths.
+	trustGate := dcstodcs2.TrustGate{PDPURL: os.Getenv("DCS_TRUST_PDP_URL")}
 	dcsToDcsSynchronizer := dcstodcs2.DCSToDCSSynchronizer{
 		DB:          db,
 		CRepo:       &cweRepo,
 		SRepo:       &syncRepo,
 		IPFSClient:  ipfsAPIClient,
 		DIDDocument: *didDocument,
+		TrustGate:   trustGate,
 	}
 	dcsToDcsSynchronizer.StartSynchronizerJob(ctx, cepSubClient)
 
@@ -473,7 +474,16 @@ func main() {
 		PDFCore:    pdfCoreClient,
 	}
 
-	didService, err := service.NewDIDService(*didDocument)
+	// Build and sign this instance's federation agreement credential once at
+	// startup (ADR-18): issuer = this instance's own DID, termsOfUse names the
+	// embedded federation rules document by its public policy URL and hash.
+	rulesPolicyURL := federation.RulesPolicyURL(os.Getenv("DCS_PUBLIC_URL"))
+	agreementCredential, err := federation.BuildAgreementCredential(ctx, vcSigner, issuerDID, rulesPolicyURL)
+	if err != nil {
+		log.Fatalf(ctx, err, "failed to build federation agreement credential")
+	}
+
+	didService, err := service.NewDIDService(*didDocument, agreementCredential, federation.Rules())
 	if err != nil {
 		log.Fatalf(ctx, err, "failed to create did service")
 	}
@@ -502,7 +512,7 @@ func main() {
 
 		contractStorageArchiveSvc = service.NewContractStorageArchive(db, jwtAuth, &cweRepo, *didDocument, auditTrailReader)
 		contractWorkflowEngineSvc = service.NewContractWorkflowEngine(db, jwtAuth, &cweRepo, &cweRTRepo, &cweATRepo, &cweNTRepo, &cweNRepo, &cweCTRepo, &syncRepo, euTrustPool, templateCatalogueClient, auditTrailReader, *didDocument, ipfsAPIClient, archiveNotaryClient, tsaClient, cweDeploymentRepo, contractTargetClient)
-		dcsToDcsSvc = service.NewDcsToDcs(db, jwtAuth, &cweRepo, &cweRTRepo, &cweATRepo, &cweNTRepo, &cweNRepo, &cweCTRepo, &syncRepo, euTrustPool, *didDocument, ipfsAPIClient, pdfCoreClient)
+		dcsToDcsSvc = service.NewDcsToDcs(db, jwtAuth, &cweRepo, &cweRTRepo, &cweATRepo, &cweNTRepo, &cweNRepo, &cweCTRepo, &syncRepo, euTrustPool, *didDocument, ipfsAPIClient, pdfCoreClient, trustGate)
 		pdfGenerationSvc = service.NewPDFGeneration(db, jwtAuth, ipfsAPIClient, &cweRepo, &ctRepo, &smCRepo, pdfCoreClient, issuerDID, provenance.NewLocalVCIssuer(vcSigner, issuerDID, statusListPublisher), did)
 		c2paSvc = service.NewC2PAService(db, ipfsAPIClient, &cweRepo, pdfCoreClient, issuerDID, provenance.NewLocalVCIssuer(vcSigner, issuerDID, statusListPublisher))
 		processAuditAndComplianceSvc = service.NewProcessAuditAndCompliance(db, jwtAuth, auditTrailReader, &ctRepo, &cweRepo, &cweATRepo)
@@ -685,47 +695,3 @@ func main() {
 	log.Printf(ctx, "exited")
 }
 
-// seedTrustedPeersFromEnv upserts every comma-separated peer DID listed in
-// DCS_TRUSTED_PEERS into the trusted_peers allowlist at startup (NFR-BR-08:
-// exchanges only between verified parties). Idempotent: re-running with the
-// same env var value is a no-op thanks to UpsertTrustedPeer's
-// ON CONFLICT (peer_did) DO NOTHING. A no-op (nothing logged/inserted) when
-// the env var is unset or empty.
-func seedTrustedPeersFromEnv(ctx context.Context, database *sqlx.DB, sRepo dcstodcsdb.SyncRepository) error {
-	raw := os.Getenv("DCS_TRUSTED_PEERS")
-	if strings.TrimSpace(raw) == "" {
-		return nil
-	}
-
-	var seeded []string
-	tx, err := database.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("could not start transaction: %w", err)
-	}
-	defer func() {
-		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-			log.Errorf(ctx, err, "could not rollback trusted-peer seeding transaction")
-		}
-	}()
-
-	for _, part := range strings.Split(raw, ",") {
-		peerDID := strings.TrimSpace(part)
-		if peerDID == "" {
-			continue
-		}
-		if err := sRepo.UpsertTrustedPeer(ctx, tx, peerDID); err != nil {
-			return fmt.Errorf("could not seed trusted peer %q: %w", peerDID, err)
-		}
-		seeded = append(seeded, peerDID)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("could not commit trusted-peer seeding transaction: %w", err)
-	}
-
-	if len(seeded) > 0 {
-		log.Printf(ctx, "seeded %d trusted peer(s) from DCS_TRUSTED_PEERS: %v", len(seeded), seeded)
-	}
-
-	return nil
-}

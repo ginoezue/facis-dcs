@@ -69,6 +69,31 @@ func main() {
 	jwk["alg"] = "ES256"
 	jwk["x5c"] = []string{base64.StdEncoding.EncodeToString(certDER)}
 
+	// The federation agreement credential (ADR-18) is signed by a SEPARATE
+	// HSM key, published here as its own verificationMethod so a verifier can
+	// tell the eIDAS/JAdES identity key (verificationMethod[0], above) apart
+	// from the VC signing key.
+	vcLabel := hsm.KeyLabelVC()
+	vcSigner, err := h.Signer(vcLabel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gendid: load vc key: %v\n", err)
+		os.Exit(1)
+	}
+	vcPub, ok := vcSigner.Public().(*ecdsa.PublicKey)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "gendid: vc key is not ECDSA")
+		os.Exit(1)
+	}
+	vcCertDER, err := selfSignedCert(host, vcPub, vcSigner)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gendid: create vc certificate: %v\n", err)
+		os.Exit(1)
+	}
+	vcJWK := hsm.ECPublicKeyJWK(vcPub)
+	vcJWK["kid"] = vcLabel
+	vcJWK["alg"] = "ES256"
+	vcJWK["x5c"] = []string{base64.StdEncoding.EncodeToString(vcCertDER)}
+
 	doc := map[string]any{
 		"@context": []string{
 			"https://www.w3.org/ns/did/v1",
@@ -82,8 +107,14 @@ func main() {
 				"controller":   *did,
 				"publicKeyJwk": jwk,
 			},
+			{
+				"id":           *did + "#" + vcLabel,
+				"type":         "JsonWebKey2020",
+				"controller":   *did,
+				"publicKeyJwk": vcJWK,
+			},
 		},
-		"assertionMethod": []string{*did + "#dev-key-1"},
+		"assertionMethod": []string{*did + "#dev-key-1", *did + "#" + vcLabel},
 	}
 	if *endpoint != "" {
 		doc["services"] = []map[string]any{

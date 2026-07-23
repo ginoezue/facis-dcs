@@ -37,11 +37,11 @@ extraEnv:
     value: "true"
   - name: AUTH_INSECURE_COOKIES
     value: "true"
-  # Reciprocal trust: instance A's DID (see values.bdd.yml's own
-  # DCS_TRUSTED_PEERS for the other half of this pair). Seeded at startup by
-  # backend/cmd/dcs/main.go's seedTrustedPeersFromEnv (~:304/665).
-  - name: DCS_TRUSTED_PEERS
-    value: "did:web:dcs-a.localhost%3A18080"
+  # Federation trust gate (ADR-18): shares instance A's ORCE (no own orce
+  # release, see the header comment), so both point their local policy
+  # endpoint at the same bootstrap 200-OK Node-RED flow.
+  - name: DCS_TRUST_PDP_URL
+    value: "http://dcs-orce:1880/trust-pdp"
   # DB-backed sync-fail retry cadence (conf.SyncFailCronJobTimeOut): fast in
   # BDD/e2e so a deferred/failed peer PDF ship is re-attempted and delivered
   # within the scenarios' replication wait (see values.bdd.yml for the rationale).
@@ -130,6 +130,12 @@ ingress:
         - path: /digital-contracting-service
           pathType: Prefix
         - path: /.well-known/did.json
+          pathType: Prefix
+        # Federation trust gate (ADR-18): same did:web-hostname-based routing
+        # as did.json above (see values.bdd.yml's own comment).
+        - path: /.well-known/dcs-agreement-credential.json
+          pathType: Prefix
+        - path: /.well-known/dcs-federation-rules.md
           pathType: Prefix
 
 # SoftHSM2 software token: own DID + own C2PA/PAdES signing keys, distinct
