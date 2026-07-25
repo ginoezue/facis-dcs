@@ -1,3 +1,9 @@
+// Package contracttemplatestate defines the template lifecycle enum. As
+// with contractworkflowengine's contractstate, there is no explicit
+// transition table here — valid transitions live imperatively in
+// templaterepository/command. REGISTERED/PUBLISHED are catalogue-facing
+// states with no equivalent in contractstate; see the copy-on-version
+// versioning scheme in command/copy.go and db/pg's CopyFromDID.
 package contracttemplatestate
 
 import (
@@ -15,9 +21,10 @@ const (
 	Rejected   ContractTemplateState = "REJECTED"
 	Reviewed   ContractTemplateState = "REVIEWED"
 	Approved   ContractTemplateState = "APPROVED"
+	Registered ContractTemplateState = "REGISTERED"
+	Published  ContractTemplateState = "PUBLISHED"
 	Deleted    ContractTemplateState = "DELETED"
 	Deprecated ContractTemplateState = "DEPRECATED"
-	Registered ContractTemplateState = "REGISTERED"
 )
 
 var validState = map[ContractTemplateState]bool{
@@ -26,9 +33,10 @@ var validState = map[ContractTemplateState]bool{
 	Rejected:   true,
 	Reviewed:   true,
 	Approved:   true,
+	Registered: true,
+	Published:  true,
 	Deleted:    true,
 	Deprecated: true,
-	Registered: true,
 }
 
 func NewContractTemplateState(s string) (ContractTemplateState, error) {

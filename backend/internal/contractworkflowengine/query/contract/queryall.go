@@ -1,44 +1,39 @@
+// Package contract implements read-side CQRS use cases scoped to a single
+// contract (as opposed to the parent query package's cross-cutting task
+// queries).
 package contract
 
 import (
 	"context"
-	contractworkflowengine "digital-contracting-service/gen/contract_workflow_engine"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	"digital-contracting-service/internal/base/identity"
+
+	"github.com/jmoiron/sqlx"
+
 	"digital-contracting-service/internal/base/conf"
 	"digital-contracting-service/internal/base/datatype"
 	"digital-contracting-service/internal/base/datatype/componenttype"
+	"digital-contracting-service/internal/base/datatype/userrole"
 	"digital-contracting-service/internal/base/event"
 	"digital-contracting-service/internal/contractworkflowengine/datatype/approvaltaskstate"
-	"digital-contracting-service/internal/contractworkflowengine/datatype/contractstate"
-	"digital-contracting-service/internal/contractworkflowengine/datatype/expirationpolicy"
 	"digital-contracting-service/internal/contractworkflowengine/datatype/negotiationtaskstate"
 	"digital-contracting-service/internal/contractworkflowengine/datatype/reviewtaskstate"
 	"digital-contracting-service/internal/contractworkflowengine/db"
 	events "digital-contracting-service/internal/contractworkflowengine/event"
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
 )
 
 type GetAllMetadataQry struct {
 	RetrievedBy string
-}
-
-type MetadataItem struct {
-	DID                string
-	ContractVersion    int
-	Name               *string
-	Description        *string
-	State              contractstate.ContractState
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	MetaData           datatype.JSON
-	CreatedBy          string
-	StartDate          *time.Time
-	ExpDate            *time.Time
-	ExpPolicy          *expirationpolicy.ExpirationPolicy
-	ExpNoticePeriod    *int
-	ResponsiblePersons *db.ResponsiblePersons
+	HolderDID   string
+	ParentDID   string
+	Pagination  datatype.Pagination
+	UserRoles   userrole.UserRoles
+	DIDDocument identity.DIDDocument
 }
 
 type ReviewTaskItem struct {
@@ -66,7 +61,7 @@ type NegotiatorTaskItem struct {
 }
 
 type GetAllMetadataResult struct {
-	Contracts       []MetadataItem
+	Contracts       []db.ContractMetadata
 	ReviewerTasks   []ReviewTaskItem
 	ApprovalTasks   []ApprovalTaskItem
 	NegotiatorTasks []NegotiatorTaskItem
@@ -85,28 +80,53 @@ func (h *GetAllMetadataHandler) Handle(ctx context.Context, query GetAllMetadata
 	ctx, cancel := context.WithTimeout(ctx, conf.TransactionTimeout())
 	defer cancel()
 
+	did, err := query.DIDDocument.GetID()
+	if err != nil {
+		return nil, fmt.Errorf("could not get DID: %w", err)
+	}
+
 	tx, err := h.DB.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("could not create transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func(tx *sqlx.Tx) {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			log.Printf("could not rollback transaction: %v", err)
+		}
+	}(tx)
 
-	contractsMetadata, err := h.CRepo.ReadAllMetaData(ctx, tx)
-	if err != nil {
-		return nil, fmt.Errorf("could not read all contracts: %w", err)
+	var contractsMetadata []db.ContractMetadata
+	if query.Pagination.Limit >= 0 {
+		contractsMetadata, err = h.CRepo.ReadAllMetaData(ctx, tx, query.Pagination)
+		if err != nil {
+			return nil, fmt.Errorf("could not read all contracts: %w", err)
+		}
 	}
 
-	negotiationTasks, err := h.NTRepo.ReadAllByNegotiator(ctx, tx, query.RetrievedBy)
+	// Full-scope hierarchy filter: keep only children whose
+	// dcs:parentContract references the requested parent DID. ReadAllMetaData
+	// already extracts parent_contract_did, so this is an in-memory narrowing.
+	if query.ParentDID != "" {
+		filtered := contractsMetadata[:0]
+		for _, c := range contractsMetadata {
+			if c.ParentContractDID != nil && *c.ParentContractDID == query.ParentDID {
+				filtered = append(filtered, c)
+			}
+		}
+		contractsMetadata = filtered
+	}
+
+	negotiationTasks, err := h.NTRepo.ReadAllByNegotiator(ctx, tx, did)
 	if err != nil {
 		return nil, fmt.Errorf("could not read all negotiation tasks: %w", err)
 	}
 
-	reviewerTasks, err := h.RTRepo.ReadAllByReviewer(ctx, tx, query.RetrievedBy)
+	reviewerTasks, err := h.RTRepo.ReadAllByReviewer(ctx, tx, did)
 	if err != nil {
 		return nil, fmt.Errorf("could not read all review tasks: %w", err)
 	}
 
-	approvalTasks, err := h.ATRepo.ReadAllByApprover(ctx, tx, query.RetrievedBy)
+	approvalTasks, err := h.ATRepo.ReadAllByApprover(ctx, tx, did)
 	if err != nil {
 		return nil, fmt.Errorf("could not read all review tasks: %w", err)
 	}
@@ -114,6 +134,8 @@ func (h *GetAllMetadataHandler) Handle(ctx context.Context, query GetAllMetadata
 	evt := events.RetrieveAllEvent{
 		RetrievedBy: query.RetrievedBy,
 		OccurredAt:  time.Now().UTC(),
+		HolderDID:   query.HolderDID,
+		UserRoles:   query.UserRoles,
 	}
 	err = event.Create(ctx, tx, evt, componenttype.ContractWorkflowEngine)
 	if err != nil {
@@ -125,62 +147,21 @@ func (h *GetAllMetadataHandler) Handle(ctx context.Context, query GetAllMetadata
 		return nil, fmt.Errorf("could not commit transaction: %w", err)
 	}
 
-	didToMetadata := make(map[string]MetadataItem)
-	var contractItems []MetadataItem
-	for _, data := range contractsMetadata {
-
-		state, err := contractstate.NewContractState(data.State)
-		if err != nil {
-			return nil, fmt.Errorf("could not create contract state: %w", err)
-		}
-
-		var expPolicy *expirationpolicy.ExpirationPolicy
-		if data.ExpPolicy != nil {
-			policy, err := expirationpolicy.NewExpirationPolicy(*data.ExpPolicy)
-			if err != nil {
-				return nil, contractworkflowengine.MakeInternalError(err)
-			}
-			expPolicy = &policy
-		}
-
-		metadata := MetadataItem{
-			DID:                data.DID,
-			ContractVersion:    data.ContractVersion,
-			State:              state,
-			Name:               data.Name,
-			Description:        data.Description,
-			CreatedBy:          data.CreatedBy,
-			CreatedAt:          data.CreatedAt,
-			UpdatedAt:          data.UpdatedAt,
-			StartDate:          data.StartDate,
-			ExpDate:            data.ExpDate,
-			ExpPolicy:          expPolicy,
-			ExpNoticePeriod:    data.ExpNoticePeriod,
-			ResponsiblePersons: data.ResponsiblePersons,
-		}
-		contractItems = append(contractItems, metadata)
-
-		didToMetadata[data.DID] = metadata
+	didToVersion := make(map[string]int, len(contractsMetadata))
+	for _, c := range contractsMetadata {
+		didToVersion[c.DID] = c.ContractVersion
 	}
 
 	var reviewTaskItems []ReviewTaskItem
 	for _, data := range reviewerTasks {
-
 		state, err := reviewtaskstate.NewReviewTaskState(data.State)
 		if err != nil {
 			return nil, fmt.Errorf("could not create review task state: %w", err)
 		}
-
-		metadata, exists := didToMetadata[data.DID]
-		var contractVersion int
-		if exists {
-			contractVersion = metadata.ContractVersion
-		}
-
 		reviewTaskItems = append(reviewTaskItems, ReviewTaskItem{
 			DID:             data.DID,
 			State:           state,
-			ContractVersion: contractVersion,
+			ContractVersion: didToVersion[data.DID],
 			Reviewer:        data.Reviewer,
 			CreatedAt:       data.CreatedAt,
 		})
@@ -188,22 +169,14 @@ func (h *GetAllMetadataHandler) Handle(ctx context.Context, query GetAllMetadata
 
 	var negotiationTaskItems []NegotiatorTaskItem
 	for _, data := range negotiationTasks {
-
 		state, err := negotiationtaskstate.NewNegotiationTaskState(data.State)
 		if err != nil {
 			return nil, fmt.Errorf("could not create negotiation task state: %w", err)
 		}
-
-		metadata, exists := didToMetadata[data.DID]
-		var contractVersion int
-		if exists {
-			contractVersion = metadata.ContractVersion
-		}
-
 		negotiationTaskItems = append(negotiationTaskItems, NegotiatorTaskItem{
 			DID:             data.DID,
 			State:           state,
-			ContractVersion: contractVersion,
+			ContractVersion: didToVersion[data.DID],
 			Negotiator:      data.Negotiator,
 			CreatedAt:       data.CreatedAt,
 		})
@@ -211,21 +184,13 @@ func (h *GetAllMetadataHandler) Handle(ctx context.Context, query GetAllMetadata
 
 	var approvalTasksItems []ApprovalTaskItem
 	for _, data := range approvalTasks {
-
 		state, err := approvaltaskstate.NewApprovalTaskState(data.State)
 		if err != nil {
 			return nil, fmt.Errorf("could not create approval task state: %w", err)
 		}
-
-		metadata, exists := didToMetadata[data.DID]
-		var contractVersion int
-		if exists {
-			contractVersion = metadata.ContractVersion
-		}
-
 		approvalTasksItems = append(approvalTasksItems, ApprovalTaskItem{
 			DID:             data.DID,
-			ContractVersion: contractVersion,
+			ContractVersion: didToVersion[data.DID],
 			State:           state,
 			Approver:        data.Approver,
 			CreatedAt:       data.CreatedAt,
@@ -233,7 +198,7 @@ func (h *GetAllMetadataHandler) Handle(ctx context.Context, query GetAllMetadata
 	}
 
 	return &GetAllMetadataResult{
-		Contracts:       contractItems,
+		Contracts:       contractsMetadata,
 		ReviewerTasks:   reviewTaskItems,
 		ApprovalTasks:   approvalTasksItems,
 		NegotiatorTasks: negotiationTaskItems,

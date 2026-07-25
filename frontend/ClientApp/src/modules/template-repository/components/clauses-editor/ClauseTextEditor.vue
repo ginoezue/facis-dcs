@@ -1,69 +1,50 @@
-<template>
-  <div class="clause-text-editor space-y-4">
-    <div class="relative">
-      <div ref="editorRef"
-        class="clause-editor textarea textarea-bordered textarea-sm w-full min-h-24 text-sm whitespace-pre-wrap wrap-break-word"
-        contenteditable="true" data-placeholder="" @input="onEditorInput" @paste="onEditorPaste" @blur="onEditorBlur"
-        @keydown="onEditorKeydown" @click="onEditorClick"></div>
-      <!-- placeholder suggestions -->
-      <div v-show="showPlaceholderSuggestions" :style="placeholderDropdownStyle" :class="placeholderDropdownClass">
-        <p class="px-3 py-2 text-xs text-base-content/50 border-b border-base-200">
-          Pick a rule parameter to insert (each rule once)
-        </p>
-        <button v-for="(opt, idx) in filteredPlaceholderOptions" :key="opt.insertText" type="button"
-          class="w-full text-left px-3 py-2 text-sm hover:bg-base-200 focus:bg-base-200 focus:outline-none"
-          :class="{ 'bg-primary/10': idx === safePlaceholderIndex }" @click="insertPlaceholder(opt)">
-          <span class="font-medium">{{ opt.parameterName }}</span>
-          <span class="text-base-content/50 ml-1">({{ opt.conditionName }})</span>
-        </button>
-        <p v-if="!filteredPlaceholderOptions.length" class="px-3 py-2 text-xs text-base-content/50 italic">
-          No parameters available or all rules already used.
-        </p>
-      </div>
-    </div>
-    <!-- rule panel -->
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <SemanticRuleList title="Used in text" empty-message="No rules used yet." :conditions="usedConditions"
-        :is-param-used-in-text="isParamUsedInText" :is-param-required-and-unused="isParamRequiredAndUnused"
-        :highlight-rule-title="true" @highlightRule="(id) => setHighlight({ conditionId: id })"
-        @highlightParam="(id, name) => setHighlight({ conditionId: id, parameterName: name })"
-        @clearHighlight="clearHighlight" @insertPlaceholder="onInsertPlaceholderFromPanel" />
-      <SemanticRuleList title="Not used" empty-message="All rules used or none defined." :conditions="unusedConditions"
-        @highlightRule="(id) => setHighlight({ conditionId: id })"
-        @highlightParam="(id, name) => setHighlight({ conditionId: id, parameterName: name })"
-        @clearHighlight="clearHighlight" @insertPlaceholder="onInsertPlaceholderFromPanel" />
-    </div>
-  </div>
-</template>
-
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { storeToRefs } from 'pinia'
-import { useTemplateEditorUiStore } from '@template-repository/store/templateEditorUiStore'
-import type { SemanticCondition } from '@template-repository/models/contract-templace'
-import { useClauseTextChips, conditionIdsInText, parseSegments, isPlaceholder, } from '@template-repository/composables/useClauseTextChips'
-import { usePlaceholderDropdownPosition, type PlaceholderDropdownMode, } from '@template-repository/composables/usePlaceholderDropdownPosition'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import SemanticRuleList from '@template-repository/components/clauses-editor/SemanticRuleList.vue'
+import {
+  conditionIdsInContent,
+  contentToString,
+  isPlaceholder,
+  parseSegmentsFromContent,
+  stringToContent,
+  useClauseTextChips,
+  usedPlaceholderKeysInContent,
+} from '@template-repository/composables/useClauseTextChips'
+import {
+  type PlaceholderDropdownMode,
+  usePlaceholderDropdownPosition,
+} from '@template-repository/composables/usePlaceholderDropdownPosition'
+import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
+import { useTemplateEditorUiStore } from '@template-repository/store/templateEditorUiStore'
+import { semanticParameterLabel } from '@template-repository/utils/semantic-parameter-label'
+import type { DcsContentSegment } from '@/models/dcs-jsonld'
+import type { SemanticCondition } from '@template-repository/models/contract-template'
 
 const PLACEHOLDER_DROPDOWN_MODE: PlaceholderDropdownMode = 'caret'
 
 const props = defineProps<{
-  /** Clause template string: plain text plus {{conditionId.parameterName}} placeholders. */
-  modelValue: string
+  /** Clause content as JSON-LD DcsContentSegment[]. */
+  modelValue: DcsContentSegment[]
   semanticConditions: SemanticCondition[]
+  textId: string
 }>()
 
 const emit = defineEmits<{
-  'update:modelValue': [value: string]
+  'update:modelValue': [value: DcsContentSegment[]]
 }>()
 
 const uiStore = useTemplateEditorUiStore()
+const draftStore = useDcsDraftStore()
 const { clausePlaceholderHighlight } = storeToRefs(uiStore)
-const { setClausePlaceholderHighlight } = uiStore
+const { blocks } = storeToRefs(draftStore)
 
 const editorRef = ref<HTMLDivElement | null>(null)
 let valueFromEditor = false
 const isMounted = ref(true)
+
+/** Internal string representation: {{conditionId.parameterName}} style. */
+const modelValueAsString = computed(() => contentToString(props.modelValue, props.semanticConditions))
 
 const {
   getTemplateText,
@@ -91,22 +72,34 @@ const selectedPlaceholderIndex = ref(0)
 /** Last cursor index in the editor */
 const lastCursorIndex = ref(0)
 
-const usedConditionIds = computed(() => conditionIdsInText(props.modelValue))
-const usedPlaceholderKeys = computed(() => {
-  const segs = parseSegments(props.modelValue, props.semanticConditions)
-  const set = new Set<string>()
-  segs.filter((s) => isPlaceholder(s)).forEach((s) => set.add(`${s.conditionId}.${s.parameterName}`))
-  return set
-})
+const usedConditionIds = computed(() => conditionIdsInContent(props.modelValue, props.semanticConditions))
+const usedPlaceholderKeys = computed(() => usedPlaceholderKeysInContent(props.modelValue, props.semanticConditions))
 const usedConditions = computed(() => props.semanticConditions.filter((c) => usedConditionIds.value.has(c.conditionId)))
-const unusedConditions = computed(() => props.semanticConditions.filter((c) => !usedConditionIds.value.has(c.conditionId)))
+const unusedConditions = computed(() =>
+  props.semanticConditions.filter((c) => !usedConditionIds.value.has(c.conditionId)),
+)
+const existingClauseConditionIds = computed(() => {
+  const ids = new Set<string>()
+  const clauseBlocks = blocks.value
 
-/** Check if a condition parameter is used in the clause text (via a placeholder) */
+  for (const block of clauseBlocks) {
+    if (block['@type'] !== 'dcs:Clause') continue
+    const content = block['dcs:content']
+    if (typeof content === 'string') continue
+    for (const id of conditionIdsInContent(content['@list'], props.semanticConditions)) ids.add(id)
+  }
+
+  return ids
+})
+
+function isConditionUsedInOtherClauses(conditionId: string): boolean {
+  return existingClauseConditionIds.value.has(conditionId)
+}
+
+/** Check if a condition parameter is used in the clause content (via a placeholder) */
 function isParamUsedInText(conditionId: string, parameterName: string): boolean {
-  const segments = parseSegments(props.modelValue, props.semanticConditions)
-  return segments.some(
-    (s) => isPlaceholder(s) && s.conditionId === conditionId && s.parameterName === parameterName
-  )
+  const segments = parseSegmentsFromContent(props.modelValue, props.semanticConditions)
+  return segments.some((s) => isPlaceholder(s) && s.conditionId === conditionId && s.parameterName === parameterName)
 }
 
 function isParamRequiredAndUnused(conditionId: string, parameterName: string): boolean {
@@ -116,11 +109,11 @@ function isParamRequiredAndUnused(conditionId: string, parameterName: string): b
 }
 
 function setHighlight(payload: { conditionId: string; parameterName?: string }) {
-  setClausePlaceholderHighlight(payload)
+  uiStore.setClausePlaceholderHighlight(payload)
 }
 
 function clearHighlight() {
-  setClausePlaceholderHighlight(null)
+  uiStore.setClausePlaceholderHighlight(null)
 }
 
 /** Handles clicks from the rule panel and inserts the corresponding placeholder if not already used,
@@ -133,32 +126,53 @@ function onInsertPlaceholderFromPanel(conditionId: string, parameterName: string
   }
 }
 
+function labeledPlaceholderText(conditionId: string, parameterName: string): string {
+  const condition = props.semanticConditions.find((item) => item.conditionId === conditionId)
+  const parameter = condition?.parameters.find((item) => item.parameterName === parameterName)
+  const placeholder = `{{${conditionId}.${parameterName}}}`
+  return parameter ? `${semanticParameterLabel(parameter)}: ${placeholder}` : placeholder
+}
+
 /** Inserts placeholder at lastCursorIndex. */
 function insertPlaceholderFromPanel(conditionId: string, parameterName: string) {
-  const insertText = `{{${conditionId}.${parameterName}}}`
-  const current = props.modelValue ?? ''
+  const insertText = labeledPlaceholderText(conditionId, parameterName)
+  const current = modelValueAsString.value
   const len = current.length
   const insertPos = Math.max(0, Math.min(lastCursorIndex.value, len))
   const before = current.slice(0, insertPos)
   const after = current.slice(insertPos)
-  const { value: newValue, insertLength } = wrapSpaces(before, insertText, after)
+  const prefix = before.length > 0 && !before.endsWith('\n') ? '\n' : ''
+  const suffix = after.length > 0 && !after.startsWith('\n') ? '\n' : ''
+  const newValue = before + prefix + insertText + suffix + after
+  const insertLength = prefix.length + insertText.length + suffix.length
   const newCursorPos = insertPos + insertLength
   applyEditorChange(newValue, newCursorPos)
 }
 
 function onEditorBlur() {
-  if (editorRef.value) lastCursorIndex.value = getCursorIndex()
+  rememberEditorCursor()
+}
+
+function rememberEditorCursor() {
+  const el = editorRef.value
+  const selection = document.getSelection()
+  if (!el || !selection?.anchorNode || !el.contains(selection.anchorNode)) return
+  const cursorIndex = getCursorIndex()
+  if (cursorIndex >= 0) {
+    lastCursorIndex.value = cursorIndex
+  }
 }
 
 const placeholderOptions = computed(() => {
   const usedKeys = usedPlaceholderKeys.value
-  const list: { insertText: string; parameterName: string; conditionName: string }[] = []
+  const list: { insertText: string; parameterName: string; label: string; conditionName: string }[] = []
   for (const c of props.semanticConditions) {
     for (const p of c.parameters) {
       if (usedKeys.has(`${c.conditionId}.${p.parameterName}`)) continue
       list.push({
         insertText: `{{${c.conditionId}.${p.parameterName}}}`,
         parameterName: p.parameterName,
+        label: semanticParameterLabel(p),
         conditionName: c.conditionName,
       })
     }
@@ -171,14 +185,15 @@ const filteredPlaceholderOptions = computed(() => {
   if (!q) return placeholderOptions.value
   return placeholderOptions.value.filter(
     (opt) =>
+      opt.label.toLowerCase().includes(q) ||
       opt.parameterName.toLowerCase().includes(q) ||
       opt.conditionName.toLowerCase().includes(q) ||
-      opt.insertText.toLowerCase().includes(q)
+      opt.insertText.toLowerCase().includes(q),
   )
 })
 
 const showPlaceholderSuggestions = computed(
-  () => placeholderOptions.value.length > 0 && placeholderInsertStart.value >= 0
+  () => placeholderOptions.value.length > 0 && placeholderInsertStart.value >= 0,
 )
 
 const safePlaceholderIndex = computed(() => {
@@ -196,7 +211,7 @@ function closePlaceholderSuggestions() {
 function onEditorClick(e: MouseEvent) {
   const target = e.target as Node
   const el = editorRef.value
-  if (!el || !el.contains(target)) return
+  if (!el?.contains(target)) return
   let node: Node | null = target
   while (node && node !== el) {
     if (node.nodeType === Node.ELEMENT_NODE) {
@@ -204,15 +219,17 @@ function onEditorClick(e: MouseEvent) {
       // update cursor position when clicking on an existing placeholder
       if (span.dataset.conditionId != null && span.dataset.parameterName != null) {
         e.preventDefault()
-        nextTick(() => {
+        void nextTick(() => {
           el.focus()
           setCursorAfter(node!)
+          rememberEditorCursor()
         })
         return
       }
     }
     node = node.parentNode
   }
+  void nextTick(() => rememberEditorCursor())
 }
 
 function onEditorPaste(e: ClipboardEvent) {
@@ -227,7 +244,7 @@ function onEditorInput() {
   const pos = getCursorIndex()
   lastCursorIndex.value = pos
   valueFromEditor = true
-  emit('update:modelValue', value)
+  emit('update:modelValue', stringToContent(value, props.semanticConditions))
 
   const textBefore = value.slice(0, pos)
   const lastOpen = textBefore.lastIndexOf('{{')
@@ -281,8 +298,7 @@ function onEditorKeydown(e: KeyboardEvent) {
   }
   if (e.key === 'ArrowUp' && list.length > 0) {
     e.preventDefault()
-    selectedPlaceholderIndex.value =
-      (selectedPlaceholderIndex.value - 1 + list.length) % list.length
+    selectedPlaceholderIndex.value = (selectedPlaceholderIndex.value - 1 + list.length) % list.length
     return
   }
 }
@@ -296,7 +312,7 @@ function insertPlaceholder(opt: { insertText: string }) {
     closePlaceholderSuggestions()
     return
   }
-  const value = props.modelValue
+  const value = modelValueAsString.value
   const before = value.slice(0, start)
   const after = value.slice(end)
   const { value: newValue, insertLength } = wrapSpaces(before, opt.insertText, after)
@@ -307,12 +323,12 @@ function insertPlaceholder(opt: { insertText: string }) {
 
 function applyEditorChange(newValue: string, newCursorPos: number) {
   valueFromEditor = false
-  emit('update:modelValue', newValue)
+  emit('update:modelValue', stringToContent(newValue, props.semanticConditions))
   lastCursorIndex.value = newCursorPos
-  nextTick(() => {
+  void nextTick(() => {
     if (!isMounted.value) return
     syncFromTemplateText(newValue, props.semanticConditions)
-    nextTick(() => {
+    void nextTick(() => {
       if (isMounted.value && editorRef.value) {
         editorRef.value.focus()
         setCursorAt(editorRef.value, newCursorPos)
@@ -324,32 +340,33 @@ function applyEditorChange(newValue: string, newCursorPos: number) {
 /** When modelValue changes from outside (e.g. parent), sync editor DOM.
  *  Skip if the change came from user input so we don't overwrite the editor.
  */
-watch(
-  () => props.modelValue,
-  () => {
-    if (valueFromEditor) {
-      valueFromEditor = false
-      return
-    }
-    nextTick(() => {
-      if (isMounted.value) syncFromTemplateText(props.modelValue, props.semanticConditions)
-    })
+watch(modelValueAsString, () => {
+  if (valueFromEditor) {
+    valueFromEditor = false
+    return
   }
+  void nextTick(() => {
+    if (isMounted.value) syncFromTemplateText(modelValueAsString.value, props.semanticConditions)
+  })
+})
+
+watch(
+  clausePlaceholderHighlight,
+  () => {
+    if (isMounted.value) applyHighlight()
+    void nextTick(() => {
+      if (isMounted.value) applyHighlight()
+    })
+  },
+  { deep: true },
 )
 
-watch(clausePlaceholderHighlight, () => {
-  if (isMounted.value) applyHighlight()
-  nextTick(() => {
-    if (isMounted.value) applyHighlight()
-  })
-}, { deep: true })
-
 watch(showPlaceholderSuggestions, (visible) => {
-  if (visible) nextTick(() => updatePlaceholderDropdownPosition())
+  if (visible) void nextTick(() => updatePlaceholderDropdownPosition())
 })
 
 onMounted(() => {
-  nextTick(() => syncFromTemplateText(props.modelValue, props.semanticConditions))
+  void nextTick(() => syncFromTemplateText(modelValueAsString.value, props.semanticConditions))
   if (PLACEHOLDER_DROPDOWN_MODE === 'caret' && editorRef.value) {
     editorRef.value.addEventListener('scroll', updatePlaceholderDropdownPosition)
   }
@@ -363,6 +380,69 @@ onBeforeUnmount(() => {
 })
 </script>
 
+<template>
+  <div class="clause-text-editor space-y-4">
+    <div class="relative">
+      <div
+        ref="editorRef"
+        role="textbox"
+        :aria-labelledby="textId"
+        class="clause-editor textarea-bordered textarea min-h-24 w-full text-sm textarea-sm wrap-break-word whitespace-pre-wrap"
+        contenteditable="true"
+        data-placeholder=""
+        @input="onEditorInput"
+        @paste="onEditorPaste"
+        @blur="onEditorBlur"
+        @keydown="onEditorKeydown"
+        @click="onEditorClick"
+      ></div>
+      <!-- placeholder suggestions -->
+      <div v-show="showPlaceholderSuggestions" :style="placeholderDropdownStyle" :class="placeholderDropdownClass">
+        <p class="border-b border-base-200 px-3 py-2 text-xs text-base-content/50">Pick a requirement field</p>
+        <button
+          v-for="(opt, idx) in filteredPlaceholderOptions"
+          :key="opt.insertText"
+          type="button"
+          class="w-full px-3 py-2 text-left text-sm hover:bg-base-200 focus:bg-base-200 focus:outline-none"
+          :class="{ 'bg-primary/10': idx === safePlaceholderIndex }"
+          @click="insertPlaceholder(opt)"
+        >
+          <span class="font-medium">{{ opt.label }}</span>
+          <span class="ml-1 text-base-content/50">({{ opt.conditionName }})</span>
+        </button>
+        <p v-if="!filteredPlaceholderOptions.length" class="px-3 py-2 text-xs text-base-content/50 italic">
+          No parameters available or all rules already used.
+        </p>
+      </div>
+    </div>
+    <!-- rule panel -->
+    <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <SemanticRuleList
+        title="Used in text"
+        empty-message="No requirements used yet."
+        :conditions="usedConditions"
+        :is-param-used-in-text="isParamUsedInText"
+        :is-param-required-and-unused="isParamRequiredAndUnused"
+        :highlight-rule-title="true"
+        @highlight-rule="(id) => setHighlight({ conditionId: id })"
+        @highlight-param="(id, name) => setHighlight({ conditionId: id, parameterName: name })"
+        @clear-highlight="clearHighlight"
+        @insert-placeholder="onInsertPlaceholderFromPanel"
+      />
+      <SemanticRuleList
+        title="Available requirements"
+        empty-message="All requirements used or none defined."
+        :conditions="unusedConditions"
+        :is-condition-used-in-other-clauses="isConditionUsedInOtherClauses"
+        @highlight-rule="(id) => setHighlight({ conditionId: id })"
+        @highlight-param="(id, name) => setHighlight({ conditionId: id, parameterName: name })"
+        @clear-highlight="clearHighlight"
+        @insert-placeholder="onInsertPlaceholderFromPanel"
+      />
+    </div>
+  </div>
+</template>
+
 <style scoped>
 .clause-editor:empty::before {
   content: attr(data-placeholder);
@@ -370,8 +450,7 @@ onBeforeUnmount(() => {
 }
 
 .clause-editor :deep(.clause-chip-highlight) {
-  border-style: solid;
-  border-color: oklch(var(--p));
+  border-bottom-color: oklch(var(--p));
   box-shadow: none;
 }
 </style>

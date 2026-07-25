@@ -2,43 +2,48 @@ package contracttemplate
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
 	"digital-contracting-service/internal/base/datatype"
 	"digital-contracting-service/internal/base/datatype/componenttype"
+	"digital-contracting-service/internal/base/datatype/userrole"
 	"digital-contracting-service/internal/base/event"
 	"digital-contracting-service/internal/templaterepository/datatype/contracttemplatestate"
 	"digital-contracting-service/internal/templaterepository/datatype/contracttemplatetype"
 	"digital-contracting-service/internal/templaterepository/db"
 	templateevents "digital-contracting-service/internal/templaterepository/event"
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
 )
 
 type GetAllMetadataByFilterQry struct {
-	RetrievedBy    string
-	DID            string
-	DocumentNumber string
-	Version        int
-	State          *contracttemplatestate.ContractTemplateState
-	TemplateType   *contracttemplatetype.ContractTemplateType
-	Name           string
-	Description    string
-	TemplateData   string
+	RetrievedBy  string
+	DID          string
+	Version      int
+	State        *contracttemplatestate.ContractTemplateState
+	TemplateType *contracttemplatetype.ContractTemplateType
+	Name         string
+	Description  string
+	TemplateData string
+	HolderDID    string
+	Pagination   datatype.Pagination
+	UserRoles    userrole.UserRoles
 }
 
 type GetAllMetadataByFilterResult struct {
-	DID                string
-	DocumentNumber     *string
-	Version            int
-	State              contracttemplatestate.ContractTemplateState
-	TemplateType       contracttemplatetype.ContractTemplateType
-	Name               *string
-	Description        *string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	ResponsiblePersons *db.ResponsiblePersons
-	MetaData           datatype.JSON
+	DID          string
+	Version      int
+	State        contracttemplatestate.ContractTemplateState
+	TemplateType contracttemplatetype.ContractTemplateType
+	Name         *string
+	Description  *string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	MetaData     datatype.JSON
 }
 
 type GetAllMetaDataByFilterHandler struct {
@@ -52,7 +57,11 @@ func (h *GetAllMetaDataByFilterHandler) Handle(ctx context.Context, query GetAll
 	if err != nil {
 		return nil, fmt.Errorf("could not create transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func(tx *sqlx.Tx) {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			log.Printf("could not rollback transaction: %v", err)
+		}
+	}(tx)
 
 	var state string
 	if query.State != nil {
@@ -65,17 +74,16 @@ func (h *GetAllMetaDataByFilterHandler) Handle(ctx context.Context, query GetAll
 	}
 
 	searchValues := db.SearchValues{
-		DID:            query.DID,
-		DocumentNumber: query.DocumentNumber,
-		Version:        query.Version,
-		State:          state,
-		TemplateType:   templateType,
-		Name:           query.Name,
-		Description:    query.Description,
-		TemplateData:   query.TemplateData,
+		DID:          query.DID,
+		Version:      query.Version,
+		State:        state,
+		TemplateType: templateType,
+		Name:         query.Name,
+		Description:  query.Description,
+		TemplateData: query.TemplateData,
 	}
 
-	contractTemplates, err := h.CTRepo.ReadAllMetaDataByFilter(ctx, tx, searchValues)
+	contractTemplates, err := h.CTRepo.ReadAllMetaDataByFilter(ctx, tx, searchValues, query.Pagination)
 	if err != nil {
 		return nil, fmt.Errorf("could not read all contract templates: %w", err)
 	}
@@ -83,6 +91,8 @@ func (h *GetAllMetaDataByFilterHandler) Handle(ctx context.Context, query GetAll
 	evt := templateevents.SearchEvent{
 		RetrievedBy: query.RetrievedBy,
 		OccurredAt:  time.Now().UTC(),
+		HolderDID:   query.HolderDID,
+		UserRoles:   query.UserRoles,
 	}
 	err = event.Create(ctx, tx, evt, componenttype.ContractTemplateRepo)
 	if err != nil {
@@ -108,16 +118,14 @@ func (h *GetAllMetaDataByFilterHandler) Handle(ctx context.Context, query GetAll
 		}
 
 		result[i] = GetAllMetadataByFilterResult{
-			DID:                data.DID,
-			DocumentNumber:     data.DocumentNumber,
-			Version:            data.Version,
-			State:              ctState,
-			TemplateType:       ctType,
-			Name:               data.Name,
-			Description:        data.Description,
-			CreatedAt:          data.CreatedAt,
-			UpdatedAt:          data.UpdatedAt,
-			ResponsiblePersons: data.ResponsiblePersons,
+			DID:          data.DID,
+			Version:      data.Version,
+			State:        ctState,
+			TemplateType: ctType,
+			Name:         data.Name,
+			Description:  data.Description,
+			CreatedAt:    data.CreatedAt,
+			UpdatedAt:    data.UpdatedAt,
 		}
 	}
 

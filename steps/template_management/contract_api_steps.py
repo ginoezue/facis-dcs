@@ -5,7 +5,9 @@ import os
 import requests as _requests
 from behave import given, then, when
 
+from core.utils import is_uuid
 from steps.support.services.contract_service import ContractService
+from steps.support.services.template_service import TemplateService
 from steps.support.api_client import (
     contract_approve_url,
     contract_create_url,
@@ -26,7 +28,7 @@ def step_when_create_contract_with_template(context, template_name):
     context.requests_response = post_json(
         context,
         contract_create_url(context),
-        {"did": context.template_dids[template_name]},
+        {"template_did": context.template_dids[template_name]},
     )
 
 
@@ -40,13 +42,13 @@ def step_when_create_contract_with_payload(context):
     context.requests_response = post_json(
         context,
         contract_create_url(context),
-        {"did": template_did},
+        {"template_did": template_did},
     )
 
 
 @when("the system attempts to create contract via API")
 def step_when_attempt_create_contract(context):
-    payload = {"did": os.getenv("BDD_TEMPLATE_DID_DEFAULT", "did:example:template:missing")}
+    payload = {"template_did": os.getenv("BDD_TEMPLATE_DID_DEFAULT", "did:example:template:missing")}
     context.requests_response = post_json(context, contract_create_url(context), payload)
 
 
@@ -55,10 +57,16 @@ def step_when_create_contract_from_template(context, template_name):
     assert hasattr(context, "template_dids") and template_name in context.template_dids, (
         f"No approved template DID for '{template_name}' — ensure the Given step ran"
     )
+    peer_did = ContractService._local_peer_did(context)
     context.requests_response = post_json(
         context,
         contract_create_url(context),
-        {"did": context.template_dids[template_name]},
+        {
+            "template_did": context.template_dids[template_name],
+            "reviewers": [peer_did],
+            "negotiators": [peer_did],
+            "approvers": [peer_did],
+        },
     )
 
 
@@ -69,10 +77,16 @@ def step_when_attempt_create_contract_from_template(context, template_name):
         if hasattr(context, "template_dids")
         else "did:example:template:missing"
     )
+    peer_did = ContractService._local_peer_did(context)
     context.requests_response = post_json(
         context,
         contract_create_url(context),
-        {"did": template_did or "did:example:template:missing"},
+        {
+            "template_did": template_did or "did:example:template:missing",
+            "reviewers": [peer_did],
+            "negotiators": [peer_did],
+            "approvers": [peer_did],
+        },
     )
 
 
@@ -81,6 +95,8 @@ def step_then_contract_unique_id(context):
     body = context.requests_response.json()
     did = body.get("did")
     assert isinstance(did, str) and did.strip(), f"Expected a contract DID, got: {body}"
+    uuid = did.split(":")[-1]
+    assert is_uuid(uuid), f"Expected {uuid} is a valid UUID"
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +105,7 @@ def step_then_contract_unique_id(context):
 # ---------------------------------------------------------------------------
 
 _ENDPOINT_PAYLOADS = {
-    "template_create":        {"template_type": "FRAME_CONTRACT", "name": "bdd-test", "description": "test", "template_data": {}},
+    "template_create":        {"template_type": TemplateService.CONTRACT_TEMPLATE_TYPE, "name": "bdd-test", "description": "test", "template_data": {}},
     "template_submit":        {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z"},
     "template_update":        {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z"},
     "template_update_manage": {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z"},
@@ -98,11 +114,11 @@ _ENDPOINT_PAYLOADS = {
     "template_reject":        {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z", "reason": "test"},
     "template_register":      {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z"},
     "template_archive":       {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z"},
-    "contract_create":        {"did": "did:example:template:1"},
+    "contract_create":        {"template_did": "did:example:template:1"},
     "contract_update":        {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z"},
     "contract_submit":        {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z"},
     "contract_negotiate":     {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z", "negotiated_by": "test", "change_request": "test"},
-    "contract_respond":       {"id": "1", "action_flag": "accept", "rejected_by": "", "rejection_reason": "", "responded_by": "bdd-test"},
+    "contract_respond":       {"id": "1", "action_flag": "ACCEPTING", "rejected_by": "", "rejection_reason": "", "responded_by": "bdd-test"},
     "contract_verify":        {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z"},
     "contract_approve":       {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z"},
     "contract_reject":        {"did": "did:example:1", "updated_at": "2024-01-01T00:00:00Z", "reason": "test"},
@@ -211,7 +227,11 @@ def step_when_update_with_new_terms(context):
     context.requests_response = put_json(
         context,
         contract_update_url(context),
-        {"did": did, "updated_at": updated_at, "contract_data": {"title": "API-updated terms"}},
+        {
+            "did": did,
+            "updated_at": updated_at,
+            "contract_data": TemplateService.canonical_document_data("API-updated terms", document_type="dcs:Contract"),
+        },
     )
 
 
@@ -348,7 +368,7 @@ def step_then_contract_can_be_updated(context):
         {
             "did": did,
             "updated_at": updated_at,
-            "contract_data": {"title": "API post-review adjustment"},
+            "contract_data": TemplateService.canonical_document_data("API post-review adjustment", document_type="dcs:Contract"),
         },
     )
     assert update_resp.status_code == 200, (

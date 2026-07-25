@@ -1,0 +1,35 @@
+{
+  "@context": [
+    "https://www.w3.org/ns/did/v1",
+    "https://w3id.org/security/suites/jws-2020/v1"
+  ],
+  "assertionMethod": [
+    "did:web:localhost%3A8991#dev-key-1"
+  ],
+  "id": "did:web:localhost%3A8991",
+  "services": [
+    {
+      "id": "did:web:localhost%3A8991#dcs",
+      "serviceEndpoint": "http://localhost:8991/api",
+      "type": "DigitalContractingService"
+    }
+  ],
+  "verificationMethod": [
+    {
+      "controller": "did:web:localhost%3A8991",
+      "id": "did:web:localhost%3A8991#dev-key-1",
+      "publicKeyJwk": {
+        "alg": "ES256",
+        "crv": "P-256",
+        "kid": "dev-key-1",
+        "kty": "EC",
+        "x": "NewrGpZ5XHYfWCeVjZ51NUP0LhK33oPaGEnoipX7788",
+        "x5c": [
+          "MIIBrTCCAVOgAwIBAgIIGMM5TpBamI8wCgYIKoZIzj0EAwIwODELMAkGA1UEBhMCREUxEDAOBgNVBAoTB0RDUyBEZXYxFzAVBgNVBAMTDmxvY2FsaG9zdDo4OTkxMB4XDTI2MDcxNzIzMDEyNloXDTI4MDcxODAwMDEyNlowODELMAkGA1UEBhMCREUxEDAOBgNVBAoTB0RDUyBEZXYxFzAVBgNVBAMTDmxvY2FsaG9zdDo4OTkxMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENewrGpZ5XHYfWCeVjZ51NUP0LhK33oPaGEnoipX77895Gbmo9Pd9xPofk3cD4LxHbYp1IFIphuNvkBgvLptKzqNHMEUwDgYDVR0PAQH/BAQDAgeAMA8GA1UdJQQIMAYGBFUdJQAwDAYDVR0TAQH/BAIwADAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSAAwRQIgVmmUrJLR1k5vVhEScmKVyHsnjbw9s9NEmQz3l+231qsCIQDZHTgRqWaFX/2/KH9PZpHaA+uZOAhhXWdMd/xz/czEsA=="
+        ],
+        "y": "eRm5qPT3fcT6H5N3A-C8R22KdSBSKYbjb5AYLy6bSs4"
+      },
+      "type": "JsonWebKey2020"
+    }
+  ]
+}

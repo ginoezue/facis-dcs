@@ -1,9 +1,9 @@
 <script setup lang="ts" generic="T extends { did: string }">
 import { Combobox, ComboboxInput, ComboboxOption, ComboboxOptions } from '@headlessui/vue'
-import { computed, ref, useTemplateRef, type Ref } from 'vue'
+import { computed, type Ref, ref, type ShallowRef, shallowRef, useTemplateRef } from 'vue'
 
 type FilterLabelConfig<T> = Partial<Record<keyof T, string>>
-type SearchFunction<T> = (request: Record<string, any>) => Promise<T[]>
+type SearchFunction<T> = (request: Record<string, unknown>) => Promise<T[]>
 
 const props = defineProps<{
   items: T[]
@@ -14,7 +14,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  searchResult: [value: T[]]
+  searchResult: [value: T[] | null]
 }>()
 
 const searchQuery = ref('')
@@ -24,11 +24,9 @@ type FilterLabels = typeof props.filterLabels
 type FilterLabelKey = keyof FilterLabels
 type FilterLabelValue = FilterLabels[FilterLabelKey]
 
-const selectedFilter = ref<FilterLabelValue>(
-  (Object.values(props.filterLabels)[0] as FilterLabelValue) ?? ('' as FilterLabelValue),
-)
-const filterPopover = useTemplateRef('filterPopover')
-const searchResults: Ref<T[]> = ref([])
+const selectedFilter = ref<FilterLabelValue>(Object.values(props.filterLabels)[0] ?? '')
+const filterPopover = useTemplateRef('filter-popover')
+const searchResults: ShallowRef<T[]> = shallowRef([])
 
 const selectedOption: Ref<T | null> = ref(null)
 
@@ -43,9 +41,7 @@ const searchedItems = computed(() => {
 
   if (searchResults.value.length === 0) return []
 
-  const backendIds = new Set(searchResults.value.map((item) => item.did))
-
-  return props.items.filter((item) => backendIds.has(item.did))
+  return searchResults.value
 })
 
 const inputValue: Ref<T> = computed(() => {
@@ -53,6 +49,8 @@ const inputValue: Ref<T> = computed(() => {
     ? props.emptyItem
     : { ...props.emptyItem, [searchKey.value]: searchQuery.value }
 })
+
+const isFilterSelectionDisabled = computed(() => Object.entries(props.filterLabels).length === 1)
 
 async function searchRequest() {
   if (searchQuery.value.length < 1 || !searchKey.value) {
@@ -80,7 +78,8 @@ async function searchList(event?: Event) {
       await searchRequest()
     }
   }
-  emit('searchResult', searchedItems.value)
+  if (searchQuery.value.trim().length > 0) emit('searchResult', searchedItems.value)
+  else emit('searchResult', null)
 }
 
 const getDisplayValue = (template: T | null): string => {
@@ -97,9 +96,13 @@ async function onComboboxFocus() {
   await searchRequest()
 }
 
-function onSearchChange(event: Event) {
+async function onSearchChange(event: Event) {
   searchQuery.value = (event.target as HTMLInputElement).value
-  searchRequest()
+  if (searchQuery.value.trim().length === 0) {
+    emit('searchResult', null)
+  } else {
+    await searchRequest()
+  }
 }
 
 function onComboboxUpdate(item: T) {
@@ -113,6 +116,8 @@ function onFilterSelect(label: FilterLabelValue) {
   selectedFilter.value = label
   filterPopover.value?.hidePopover()
 }
+
+const showInitialFocus = ref(true)
 </script>
 
 <template>
@@ -121,24 +126,41 @@ function onFilterSelect(label: FilterLabelValue) {
       <button
         id="list-btn-search"
         type="button"
-        class="select select-secondary w-full rounded-t-md rounded-b-none sm:rounded-l-md sm:rounded-tr-none"
+        class="select-button btn w-full cursor-default rounded-t-md rounded-b-none border-secondary btn-outline-default sm:rounded-l-md sm:rounded-tr-none"
         popovertarget="list-popover-search"
-        :class="{ 'btn-disabled': Object.entries(filterLabels).length === 1 }"
+        aria-haspopup="listbox"
+        :aria-expanded="filterPopover?.matches(':popover-open')"
+        :class="{ 'btn-disabled': isFilterSelectionDisabled }"
+        :disabled="isFilterSelectionDisabled"
       >
         {{ selectedFilter }}
       </button>
       <ul
-        ref="filterPopover"
-        class="dropdown dropdown-start menu w-52 rounded-box bg-base-300 shadow-sm"
-        popover
         id="list-popover-search"
+        ref="filter-popover"
+        class="menu dropdown dropdown-start mt-2 w-52 rounded-box bg-base-300 shadow-sm"
+        popover
+        role="listbox"
+        :aria-label="'Select search filter'"
+        @toggle="(event) => (event.newState === 'closed' ? (showInitialFocus = true) : null)"
       >
-        <li class="menu-title">
-          <span class="menu-disabled pointer-events-none select-none">Select search filter</span>
+        <li role="option" aria-selected="false" class="menu-title">
+          <span class="menu-disabled pointer-events-none text-base-content/70 select-none">Select search filter</span>
         </li>
-        <template v-for="[key, label] in Object.entries(filterLabels)" :key="key">
-          <li>
-            <a :class="{ 'bg-primary text-primary-content': label === selectedFilter }" @click="onFilterSelect(label)">
+        <template v-for="([key, label], index) in Object.entries(filterLabels)" :key="key">
+          <li role="option" :aria-selected="label === selectedFilter">
+            <a
+              tabindex="0"
+              :autofocus="index === 0"
+              :class="{
+                'bg-primary text-primary-content': label === selectedFilter,
+                'menu-focus': index === 0 && showInitialFocus,
+              }"
+              @blur="index === 0 ? (showInitialFocus = false) : null"
+              @click="onFilterSelect(label)"
+              @keydown.enter="onFilterSelect(label)"
+              @keydown.space.prevent="onFilterSelect(label)"
+            >
               {{ label }}
             </a>
           </li>
@@ -146,21 +168,22 @@ function onFilterSelect(label: FilterLabelValue) {
       </ul>
     </div>
     <div class="relative grow">
-      <Combobox v-model="selectedOption" @update:model-value="onComboboxUpdate" nullable>
-        <label class="input input-secondary join-item w-full rounded-none -mt-px ms-0 sm:mt-0 sm:-ms-px">
+      <Combobox v-model="selectedOption" nullable @update:model-value="onComboboxUpdate">
+        <label class="input join-item ms-0 -mt-px w-full rounded-none input-secondary sm:-ms-px sm:mt-0">
           <ComboboxInput
-            @change="onSearchChange"
-            @focus="onComboboxFocus"
-            @keydown.enter="searchList"
             :display-value="(item) => getDisplayValue(item as T | null)"
             :placeholder="placeholder || 'Search'"
             class="w-full bg-transparent"
+            :aria-label="placeholder || 'Search'"
+            @change="onSearchChange"
+            @focus="onComboboxFocus"
+            @keydown.enter="searchList"
           />
         </label>
 
         <ComboboxOptions
           v-if="searchQuery.length > 0"
-          class="absolute left-0 right-0 top-full z-10 rounded-lg border border-base-300 bg-base-100 shadow-lg"
+          class="absolute top-full right-0 left-0 z-10 rounded-lg border border-base-300 bg-base-100 shadow-lg"
         >
           <ComboboxOption :value="inputValue" class="hidden"></ComboboxOption>
 
@@ -169,9 +192,9 @@ function onFilterSelect(label: FilterLabelValue) {
             <ComboboxOption
               v-for="item in searchedItems"
               :key="item.did"
+              v-slot="{ active, selected }"
               :value="item"
               as="template"
-              v-slot="{ active, selected }"
             >
               <li v-if="searchKey" :class="autocompleteOptionClasses(active, selected)">
                 <span class="block truncate">{{ item[searchKey] }}</span>
@@ -184,8 +207,9 @@ function onFilterSelect(label: FilterLabelValue) {
       </Combobox>
     </div>
     <button
+      type="button"
+      class="btn join-item ms-0 -mt-px rounded-t-none rounded-b-md btn-secondary sm:-ms-px sm:mt-0 sm:rounded-r-md sm:rounded-bl-none"
       @click="searchList"
-      class="btn btn-secondary join-item rounded-b-md rounded-t-none sm:rounded-r-md sm:rounded-bl-none -mt-px ms-0 sm:mt-0 sm:-ms-px"
     >
       Search
     </button>

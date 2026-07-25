@@ -1,3 +1,7 @@
+// Package componenttype enumerates the domains that can own an event/audit
+// entry (used as the "component" tag on outbox events and audit-trail rows,
+// and to route outbox-processor CID-chaining per resource, see
+// base/event.OutboxProcessor).
 package componenttype
 
 import (
@@ -8,19 +12,23 @@ import (
 type ComponentType string
 
 const (
-	ContractTemplateRepo      ComponentType = "CONTRACT_TEMPLATE_REPOSITORY"
-	ContractWorkflowEngine    ComponentType = "CONTRACT_WORKFLOW_ENGINE"
-	ContractStorageArchive    ComponentType = "CONTRACT_STORAGE_ARCHIVE"
-	ProcessAuditAndCompliance ComponentType = "PROCESS_AUDIT_AND_COMPLIANCE"
-	SignatureManagement       ComponentType = "SIGNATURE_MANAGEMENT"
+	ContractTemplateRepo         ComponentType = "CONTRACT_TEMPLATE_REPOSITORY"
+	ContractWorkflowEngine       ComponentType = "CONTRACT_WORKFLOW_ENGINE"
+	ContractStorageArchive       ComponentType = "CONTRACT_STORAGE_ARCHIVE"
+	ProcessAuditAndCompliance    ComponentType = "PROCESS_AUDIT_AND_COMPLIANCE"
+	SignatureManagement          ComponentType = "SIGNATURE_MANAGEMENT"
+	TemplateCatalogueIntegration ComponentType = "TEMPLATE_CATALOGUE_INTEGRATION"
+	System                       ComponentType = "SYSTEM"
 )
 
-var validFlag = map[ComponentType]bool{
-	ContractTemplateRepo:      true,
-	ContractWorkflowEngine:    true,
-	ContractStorageArchive:    true,
-	ProcessAuditAndCompliance: true,
-	SignatureManagement:       true,
+var validType = map[ComponentType]bool{
+	ContractTemplateRepo:         true,
+	ContractWorkflowEngine:       true,
+	ContractStorageArchive:       true,
+	ProcessAuditAndCompliance:    true,
+	SignatureManagement:          true,
+	TemplateCatalogueIntegration: true,
+	System:                       true,
 }
 
 func NewComponentType(s string) (ComponentType, error) {
@@ -34,7 +42,7 @@ func NewComponentType(s string) (ComponentType, error) {
 // IsValid checks if the ComponentType is a valid role
 func (f ComponentType) IsValid() bool {
 	upper := ComponentType(strings.ToUpper(string(f)))
-	return validFlag[upper]
+	return validType[upper]
 }
 
 // String returns the string representation of the ComponentType

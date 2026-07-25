@@ -1,8 +1,8 @@
+import 'vue-router'
 import type { UserRole } from '@/types/user-role'
 import type { FunctionalComponent, HTMLAttributes, VNodeProps } from 'vue'
-import 'vue-router'
 
-export { }
+export {}
 
 declare module 'vue-router' {
   interface RouteMeta {

@@ -1,10 +1,10 @@
 <script setup lang="ts" generic="T extends { did: string; type: 'template' | 'contract' }">
-import type { PartialContractTemplate } from '@/models/contract-template'
-import type { Contract } from '@/models/contract/contract'
+import { computed } from 'vue'
 import { useContractTemplatesStore } from '@/stores/contract-templates-store'
 import { useContractsStore } from '@/stores/contracts-store'
-import { computed } from 'vue'
 import ListSearch from '../ListSearch.vue'
+import type { Contract } from '@/models/contract/contract'
+import type { PartialContractTemplate } from '@/models/contract-template'
 
 type Searchable = PartialContractTemplate | Contract
 
@@ -26,12 +26,11 @@ const filterLabels: Partial<Record<keyof Searchable, string>> = {
 
 const emptyTemplate: PartialContractTemplate = {
   did: '',
-  document_number: '',
   version: -1,
   created_at: '',
   updated_at: '',
   name: '',
-  template_type: 'FRAME_CONTRACT',
+  template_type: 'CONTRACT_TEMPLATE',
   state: 'DRAFT',
   created_by: '',
 }
@@ -45,12 +44,12 @@ const searchableItems = computed(() => {
     seenDids.add(task.did)
 
     if (task.type === 'template') {
-      const template = templatesStore.contractTemplates.find((t) => t.did === task.did)
+      const template = templatesStore.findTemplateByDid(task.did)
       if (template) {
         items.push(template)
       }
     } else {
-      const contract = contractsStore.contracts.find((c) => c.did === task.did)
+      const contract = contractsStore.findContractByDid(task.did)
       if (contract) {
         items.push(contract)
       }
@@ -59,18 +58,20 @@ const searchableItems = computed(() => {
   return items
 })
 
-const search = async (request: Record<string, any>): Promise<Searchable[]> => {
-  if (!request.name) return searchableItems.value
+const search = (request: Record<string, unknown>): Promise<Searchable[]> => {
+  if (!request.name) return Promise.resolve(searchableItems.value)
 
-  const query = String(request.name).toLowerCase()
-  return searchableItems.value.filter((item) => {
-    const name = item.name ? String(item.name).toLowerCase() : ''
-    return name.includes(query)
-  })
+  const query = (typeof request.name === 'string' ? request.name : '').toLowerCase()
+  return Promise.resolve(
+    searchableItems.value.filter((item) => {
+      const name = item.name ? String(item.name).toLowerCase() : ''
+      return name.includes(query)
+    }),
+  )
 }
 
-const handleSearchResult = (searchResults: Searchable[]) => {
-  const resultDids = new Set(searchResults.map((item) => item.did))
+const handleSearchResult = (searchResults: Searchable[] | null) => {
+  const resultDids = new Set(searchResults?.map((item) => item.did))
   const filteredTasks = props.tasks.filter((task) => resultDids.has(task.did))
   emit('searchResult', filteredTasks)
 }

@@ -1,41 +1,80 @@
 <script setup lang="ts">
 import { useContractTemplateEventType } from '@/composables/useContractTemplateEventType'
-import type { ContractTemplateAuditResponse } from '@/models/responses/template-response'
 import { toProperCase } from '@/utils/string'
+import type { ContractTemplateAuditResponse } from '@/models/responses/template-response'
 
 defineProps<{
   audits: ContractTemplateAuditResponse
 }>()
 
 const eventType = useContractTemplateEventType()
+
+type TemplateAuditItem = ContractTemplateAuditResponse[number]
+
+const isPolicyFinding = (audit: TemplateAuditItem) => String(audit.event_type) === 'TEMPLATE_POLICY_AUDIT_FINDING'
+
+const policyField = (audit: TemplateAuditItem, key: string) => {
+  const data = audit.event_data as unknown
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return ''
+  const value = (data as Record<string, unknown>)[key]
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
+}
+
+const policyBadgeClass = (audit: TemplateAuditItem) => {
+  const severity = policyField(audit, 'severity').toLowerCase()
+  if (severity === 'error') return 'badge-error'
+  if (severity === 'warning') return 'badge-warning'
+  return 'badge-info'
+}
 </script>
 
 <template>
   <ul class="list">
     <li v-for="audit in audits" :key="audit.id" class="list-row grid-cols-1">
       <div class="flex justify-between">
-        <div>{{ new Date(audit.event_data.occurred_at).toLocaleString() }}</div>
-        <div class="badge badge-secondary badge-outline badge-sm">{{ toProperCase(audit.event_type) }}</div>
+        <div>{{ new Date(audit.created_at).toLocaleString() }}</div>
+        <div
+          v-if="isPolicyFinding(audit)"
+          class="badge badge-soft badge-sm font-medium"
+          :class="policyBadgeClass(audit)"
+        >
+          {{ policyField(audit, 'severity') || 'finding' }}
+        </div>
+        <div v-else class="badge badge-soft badge-sm badge-secondary">{{ toProperCase(audit.event_type) }}</div>
         <div class="text-xs">{{ toProperCase(audit.component) }}</div>
       </div>
       <div class="list-col-wrap">
-        <div v-if="eventType.isCreateEvent(audit)">
+        <div v-if="isPolicyFinding(audit)" class="space-y-1">
+          <div v-if="policyField(audit, 'objectName')" class="text-xs font-medium opacity-70">
+            {{ policyField(audit, 'objectName') }}
+            <span v-if="policyField(audit, 'state')">· {{ policyField(audit, 'state') }}</span>
+            <span v-if="policyField(audit, 'templateType')">· {{ policyField(audit, 'templateType') }}</span>
+          </div>
+          <div class="font-medium">{{ policyField(audit, 'title') || 'Policy finding' }}</div>
+          <div class="text-sm opacity-85">{{ policyField(audit, 'message') }}</div>
+          <div class="text-xs opacity-70">
+            {{ policyField(audit, 'ruleId') }}
+            <span v-if="policyField(audit, 'fieldIri')">· {{ policyField(audit, 'fieldIri') }}</span>
+            <span v-if="policyField(audit, 'requirement')">· {{ policyField(audit, 'requirement') }}</span>
+          </div>
+        </div>
+        <div v-else-if="eventType.isCreateEvent(audit)">
           <div>Created by: {{ audit.event_data.created_by }}</div>
         </div>
-        <div v-if="eventType.isCopyEvent(audit)">
+        <div v-else-if="eventType.isCopyEvent(audit)">
           <div>Copied by: {{ audit.event_data.copied_by }}</div>
         </div>
         <div v-else-if="eventType.isSubmitEvent(audit)" class="flex justify-between">
           <div>Submitted by: {{ audit.event_data.submitted_by }}</div>
           <div>
             Transition:
-            <span class="badge badge-outline badge-secondary badge-xs">{{
-              toProperCase(audit.event_data.previous_state)
-            }}</span>
+            <span class="badge badge-soft badge-xs badge-secondary">
+              {{ toProperCase(audit.event_data.previous_state) }}
+            </span>
             →
-            <span class="badge badge-outline badge-secondary badge-xs">{{
-              toProperCase(audit.event_data.new_state)
-            }}</span>
+            <span class="badge badge-soft badge-xs badge-secondary">
+              {{ toProperCase(audit.event_data.new_state) }}
+            </span>
           </div>
         </div>
         <div v-else-if="eventType.isApproveEvent(audit)">
@@ -49,7 +88,7 @@ const eventType = useContractTemplateEventType()
           <div>Verified by: {{ audit.event_data.verified_by }}</div>
         </div>
         <div v-else-if="eventType.isUpdateEvent(audit)">
-          <div>Updated at: {{ audit.event_data.updated_at }}</div>
+          <div>Updated by: {{ audit.event_data.updated_by }}</div>
         </div>
         <div v-else-if="eventType.isSearchEvent(audit)">
           <div>Retrieved by: {{ audit.event_data.retrieved_by }}</div>
@@ -65,6 +104,9 @@ const eventType = useContractTemplateEventType()
         </div>
         <div v-else-if="eventType.isRegisterEvent(audit)">
           <div>Registered by: {{ audit.event_data.registered_by }}</div>
+        </div>
+        <div v-else-if="eventType.isPublishEvent(audit)">
+          <div>Published by: {{ audit.event_data.published_by }}</div>
         </div>
         <div v-else-if="eventType.isAuditEvent(audit)">
           <div>Audited by: {{ audit.event_data.audited_by }}</div>

@@ -2,20 +2,30 @@ package command
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	"digital-contracting-service/internal/base/datatype/userrole"
+
+	"github.com/jmoiron/sqlx"
+
 	"digital-contracting-service/internal/base/conf"
 	"digital-contracting-service/internal/base/datatype/componenttype"
 	"digital-contracting-service/internal/base/event"
+	"digital-contracting-service/internal/contractworkflowengine/datatype/contractstate"
 	"digital-contracting-service/internal/signingmanagement/db"
 	signingmanagementevents "digital-contracting-service/internal/signingmanagement/event"
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
 )
 
 type RevokeCmd struct {
 	DID       string
+	SignerDID string
 	RevokedBy string
+	HolderDID string
+	UserRoles userrole.UserRoles
 }
 
 type Revoker struct {
@@ -32,18 +42,42 @@ func (h *Revoker) Handle(ctx context.Context, cmd RevokeCmd) error {
 	if err != nil {
 		return fmt.Errorf("could not start transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func(tx *sqlx.Tx) {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			log.Printf("could not rollback transaction: %v", err)
+		}
+	}(tx)
 
-	processData, err := h.CRepo.ReadProcessData(ctx, tx, cmd.DID)
+	processData, err := h.CRepo.ReadProcessDataByDID(ctx, tx, cmd.DID)
 	if err != nil {
 		return fmt.Errorf("could not read process data: %w", err)
+	}
+
+	err = h.CRepo.RevokeSignature(ctx, tx, cmd.DID, cmd.SignerDID)
+	if err != nil {
+		return fmt.Errorf("could not revoke signature: %w", err)
+	}
+
+	// Beyond flipping the signature row's own status, revoking a signature
+	// transitions the contract's own lifecycle state to REVOKED (C2PA lifecycle
+	// banner "suspended", DCS-OR-C2PA-006). The Signed/Active -> Revoked
+	// edge is validated against the single-source-of-truth transition table
+	// (contractstate.Transitions), analogous to command/apply.go's
+	// APPROVED -> SIGNED transition — no hardcoded SQL state literal decides it.
+	if err := contractstate.ValidateTransition(contractstate.ContractState(processData.State), contractstate.EventRevoke); err != nil {
+		return err
+	}
+	if err := h.CRepo.UpdateState(ctx, tx, cmd.DID, contractstate.Revoked.String()); err != nil {
+		return fmt.Errorf("could not update contract state to revoked: %w", err)
 	}
 
 	evt := signingmanagementevents.RevokeEvent{
 		DID:             cmd.DID,
 		ContractVersion: processData.ContractVersion,
 		RevokedBy:       cmd.RevokedBy,
-		OccurredAt:      time.Now(),
+		OccurredAt:      time.Now().UTC(),
+		HolderDID:       cmd.HolderDID,
+		UserRoles:       cmd.UserRoles,
 	}
 	err = event.Create(ctx, tx, evt, componenttype.SignatureManagement)
 	if err != nil {

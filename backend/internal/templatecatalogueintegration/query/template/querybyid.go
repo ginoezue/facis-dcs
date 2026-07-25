@@ -2,63 +2,67 @@ package template
 
 import (
 	"context"
-	templatecatalogueintegration "digital-contracting-service/gen/template_catalogue_integration"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
+	"strings"
+	"time"
 
+	"github.com/jmoiron/sqlx"
+
+	templatecatalogueintegration "digital-contracting-service/gen/template_catalogue_integration"
+	"digital-contracting-service/internal/base/datatype/componenttype"
+	"digital-contracting-service/internal/base/datatype/userrole"
+	"digital-contracting-service/internal/base/event"
 	"digital-contracting-service/internal/templatecatalogueintegration/client"
+	catalogueevents "digital-contracting-service/internal/templatecatalogueintegration/event"
 	"digital-contracting-service/internal/templatecatalogueintegration/internal/ptr"
 )
 
 type GetByIDQry struct {
-	Token string
-	DID   string
+	DID         string
+	Version     int
+	RetrievedBy string
+	HolderDID   string
+	UserRoles   userrole.UserRoles
 }
 
 type GetByIDHandler struct {
-	Ctx      context.Context
+	DB       *sqlx.DB
 	FCClient *client.FederatedCatalogueClient
 }
 
 const retrieveTemplateByIDStatement = `
-MATCH (ct:ContractTemplate)
-WHERE ct.did = $did
-OPTIONAL MATCH (ct)-[:operatedBy]->(p:Participant)
-OPTIONAL MATCH (p)-[:headquarterAddress]->(hq)
-OPTIONAL MATCH (p)-[:TermsAndConditions]->(tc)
+MATCH (ct)
+WHERE ct.templateUuid IS NOT NULL
+  AND head(ct.claimsGraphUri) = $did
 RETURN {
-  did: ct.did,
-  document_number: ct.documentNumber,
-  version: ct.version,
-  schema_version: ct.schemaVersion,
+  did: head(ct.claimsGraphUri),
   name: ct.name,
   description: ct.description,
+  version: ct.version,
+  state: ct.state,
+  template_uuid: ct.templateUuid,
   template_type: ct.templateType,
-  participant_id: p.uri,
-  participant: {
-    legal_name: p.legalName,
-    registration_number: p.registrationNumber,
-    lei_code: p.leiCode,
-    headquarter_address: {
-      country: hq.country,
-      locality: hq.locality
-    },
-    terms_and_conditions: tc.url
-  },
-  created_at: ct.createdAt,
-  updated_at: ct.updatedAt
+  template_data_string: ct.templateDataString
 } AS n
 LIMIT 1
 `
 
-func (h *GetByIDHandler) Handle(qry GetByIDQry) (*templatecatalogueintegration.TemplateCatalogueRetrieveByIDResponse, error) {
+func (h *GetByIDHandler) Handle(ctx context.Context, qry GetByIDQry) (*templatecatalogueintegration.TemplateCatalogueRetrieveByIDResponse, error) {
 	if h.FCClient == nil {
-		return nil, fmt.Errorf("federated catalogue client is nil")
+		return nil, client.ErrFederatedCatalogueNotConfigured
 	}
 	if qry.DID == "" {
 		return nil, fmt.Errorf("did is empty")
 	}
+	if qry.Version < 1 {
+		return nil, fmt.Errorf("version must be greater than 0")
+	}
 
-	resp, err := h.FCClient.Query(h.Ctx, qry.Token, client.QueryRequest{
+	resp, err := h.FCClient.Query(ctx, client.QueryRequest{
 		Statement: retrieveTemplateByIDStatement,
 		Parameters: map[string]string{
 			"did": qry.DID,
@@ -71,48 +75,87 @@ func (h *GetByIDHandler) Handle(qry GetByIDQry) (*templatecatalogueintegration.T
 		return nil, nil
 	}
 
-	var n map[string]interface{}
-	for _, v := range resp.Items[0] {
-		if m, ok := v.(map[string]interface{}); ok {
-			n = m
-			break
-		}
-	}
+	n := projectionMap(resp.Items[0])
 	if n == nil {
 		return nil, fmt.Errorf("query projection missing projected map for did=%s", qry.DID)
 	}
 
-	return &templatecatalogueintegration.TemplateCatalogueRetrieveByIDResponse{
-		Did:            ptr.StringFromMap(n, "did"),
-		DocumentNumber: ptr.Ref(ptr.StringFromMap(n, "document_number")),
-		Version:        ptr.Ref(ptr.IntFromMap(n, "version")),
-		SchemaVersion:  ptr.Ref(ptr.IntFromMap(n, "schema_version")),
-		Name:           ptr.Ref(ptr.StringFromMap(n, "name")),
-		Description:    ptr.Ref(ptr.StringFromMap(n, "description")),
-		TemplateType:   ptr.Ref(ptr.StringFromMap(n, "template_type")),
-		Participant:    mapTemplateParticipantSummary(n),
-		CreatedAt:      ptr.Ref(ptr.StringFromMap(n, "created_at")),
-		UpdatedAt:      ptr.Ref(ptr.StringFromMap(n, "updated_at")),
-	}, nil
+	result := mapCatalogueDetail(n)
+	if result == nil {
+		return nil, nil
+	}
+
+	if result.Version == nil || *result.Version != qry.Version {
+		return nil, nil
+	}
+
+	if h.DB != nil {
+		tx, err := h.DB.BeginTxx(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("could not create transaction: %w", err)
+		}
+		defer func(tx *sqlx.Tx) {
+			if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+				log.Printf("could not rollback transaction: %v", err)
+			}
+		}(tx)
+
+		evt := catalogueevents.RetrieveByIDEvent{
+			DID:         qry.DID,
+			Version:     qry.Version,
+			RetrievedBy: qry.RetrievedBy,
+			OccurredAt:  time.Now().UTC(),
+			HolderDID:   qry.HolderDID,
+			UserRoles:   qry.UserRoles,
+		}
+		err = event.Create(ctx, tx, evt, componenttype.TemplateCatalogueIntegration)
+		if err != nil {
+			return nil, fmt.Errorf("could not create event: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("could not commit transaction: %w", err)
+		}
+	}
+
+	templateData, err := templateDataFromString(ptr.StringFromMap(n, "template_data_string"))
+	if err != nil {
+		return nil, err
+	}
+
+	result.TemplateData = templateData
+	return result, nil
 }
 
-func mapTemplateParticipantSummary(n map[string]interface{}) *templatecatalogueintegration.TemplateCatalogueParticipantSummary {
-	participantRaw, ok := n["participant"].(map[string]interface{})
-	if !ok || participantRaw == nil {
-		// Optional participant summary
+func mapCatalogueDetail(n map[string]interface{}) *templatecatalogueintegration.TemplateCatalogueRetrieveByIDResponse {
+	if n == nil {
 		return nil
 	}
 
-	headquarterRaw, _ := participantRaw["headquarter_address"].(map[string]interface{})
-
-	return &templatecatalogueintegration.TemplateCatalogueParticipantSummary{
-		LegalName:          ptr.Ref(ptr.StringFromMap(participantRaw, "legal_name")),
-		RegistrationNumber: ptr.Ref(ptr.StringFromMap(participantRaw, "registration_number")),
-		LeiCode:            ptr.Ref(ptr.StringFromMap(participantRaw, "lei_code")),
-		HeadquarterAddress: &templatecatalogueintegration.TemplateCatalogueParticipantHeadquarterSummary{
-			Country:  ptr.Ref(ptr.StringFromMap(headquarterRaw, "country")),
-			Locality: ptr.Ref(ptr.StringFromMap(headquarterRaw, "locality")),
-		},
-		TermsAndConditions: ptr.Ref(ptr.StringFromMap(participantRaw, "terms_and_conditions")),
+	did := ptr.StringFromMap(n, "did")
+	if strings.TrimSpace(did) == "" {
+		return nil
 	}
+
+	return &templatecatalogueintegration.TemplateCatalogueRetrieveByIDResponse{
+		Did:          did,
+		Version:      ptr.Ref(ptr.IntFromMap(n, "version")),
+		Name:         ptr.Ref(ptr.StringFromMap(n, "name")),
+		Description:  ptr.Ref(ptr.StringFromMap(n, "description")),
+		TemplateType: ptr.Ref(ptr.StringFromMap(n, "template_type")),
+	}
+}
+
+func templateDataFromString(raw string) (map[string]interface{}, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("template data is missing from Federated Catalogue")
+	}
+
+	var templateData map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &templateData); err != nil {
+		return nil, fmt.Errorf("parse template data from Federated Catalogue: %w", err)
+	}
+
+	return templateData, nil
 }

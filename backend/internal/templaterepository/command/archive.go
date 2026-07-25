@@ -2,22 +2,27 @@ package command
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
 	"digital-contracting-service/internal/base/datatype/componenttype"
+	"digital-contracting-service/internal/base/datatype/userrole"
 	"digital-contracting-service/internal/base/event"
 	"digital-contracting-service/internal/templaterepository/datatype/contracttemplatestate"
 	"digital-contracting-service/internal/templaterepository/db"
 	templateevents "digital-contracting-service/internal/templaterepository/event"
-	"errors"
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
 )
 
 type ArchiveCmd struct {
 	DID        string
 	UpdatedAt  time.Time
 	ArchivedBy string
+	HolderDID  string
+	UserRoles  userrole.UserRoles
 }
 
 type Archiver struct {
@@ -33,14 +38,20 @@ func (h *Archiver) Handle(ctx context.Context, cmd ArchiveCmd) error {
 	if err != nil {
 		return fmt.Errorf("could not start transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func(tx *sqlx.Tx) {
+		err := tx.Rollback()
+		if err != nil {
+			log.Printf("could not rollback transaction: %v", err)
+		}
+	}(tx)
 
-	processData, err := h.CTRepo.ReadProcessData(ctx, tx, cmd.DID)
+	processData, err := h.CTRepo.ReadProcessDataByDID(ctx, tx, cmd.DID)
 	if err != nil {
 		return fmt.Errorf("could not read process data: %w", err)
 	}
 
-	if cmd.UpdatedAt.Unix() < processData.UpdatedAt.Unix() {
+	// Optimistic concurrency (see command package doc / ADR-0007).
+	if cmd.UpdatedAt.Unix() < processData.ContentUpdatedAt.Unix() {
 		return errors.New("contract template was updated elsewhere, please reload")
 	}
 
@@ -49,7 +60,7 @@ func (h *Archiver) Handle(ctx context.Context, cmd ArchiveCmd) error {
 		return errors.New("invalid contract template state")
 	}
 
-	if processData.State == contracttemplatestate.Approved.String() || processData.State == contracttemplatestate.Registered.String() {
+	if processData.State == contracttemplatestate.Registered.String() || processData.State == contracttemplatestate.Published.String() {
 
 		err = h.CTRepo.UpdateState(ctx, tx, cmd.DID, contracttemplatestate.Deprecated.String())
 		if err != nil {
@@ -65,11 +76,12 @@ func (h *Archiver) Handle(ctx context.Context, cmd ArchiveCmd) error {
 	}
 
 	evt := templateevents.ArchiveEvent{
-		DID:            cmd.DID,
-		DocumentNumber: processData.DocumentNumber,
-		Version:        processData.Version,
-		ArchivedBy:     cmd.ArchivedBy,
-		OccurredAt:     time.Now().UTC(),
+		DID:        cmd.DID,
+		Version:    processData.Version,
+		ArchivedBy: cmd.ArchivedBy,
+		OccurredAt: time.Now().UTC(),
+		HolderDID:  cmd.HolderDID,
+		UserRoles:  cmd.UserRoles,
 	}
 	err = event.Create(ctx, tx, evt, componenttype.ContractTemplateRepo)
 	if err != nil {

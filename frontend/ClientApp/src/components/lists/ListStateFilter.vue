@@ -1,18 +1,18 @@
 <script setup lang="ts">
-import type { FilterStore } from '@/models/stores/filter-store'
+import { computed, ref } from 'vue'
 import {
   useApprovalTaskStateFilterStore,
-  useNegotiationTaskStateFilterStore,
   useContractStateFilterStore,
+  useNegotiationTaskStateFilterStore,
   useReviewTaskStateFilterStore,
   useTemplateStateFilterStore,
 } from '@/stores/state-filter-store'
+import type { FilterStore } from '@/models/stores/filter-store'
 import type { ApprovalTaskState } from '@/types/approval-task-state'
 import type { ContractState } from '@/types/contract-state'
 import type { ContractTemplateState } from '@/types/contract-template-state'
 import type { NegotiationTaskState } from '@/types/negotiation-task-state'
 import type { ReviewTaskState } from '@/types/review-task-state'
-import { computed, ref } from 'vue'
 
 const storeMap = {
   templates: useTemplateStateFilterStore,
@@ -24,7 +24,7 @@ const storeMap = {
 
 type StoreType = keyof typeof storeMap
 
-type FilterMap = {
+interface FilterMap {
   templates: ContractTemplateState
   contracts: ContractState
   reviewTasks: ReviewTaskState
@@ -72,40 +72,62 @@ const setFilter = (stateFilter: FilterMap[typeof props.storeType]) => {
 const isSelected = (type: FilterMap[typeof props.storeType]) => {
   return filterStore.hasFilter(type)
 }
+
+const showInitialFocus = ref(true)
 </script>
 
 <template>
   <button
     id="popover-btn"
     popovertarget="filter-popover"
-    class="select select-secondary w-fit gap-2 m-2"
+    class="select-button btn m-2 btn-block w-fit cursor-default justify-between gap-2 border-secondary btn-outline-default"
     :class="{ 'btn-disabled': disabled }"
     :disabled="!!disabled"
   >
     Filter
   </button>
-  <ul id="filter-popover" popover class="dropdown menu rounded-box rounded-md bg-base-300 shadow-sm">
-    <li class="menu-title pointer-events-none">
-      <label class="label">{{ label }}</label>
+  <ul
+    id="filter-popover"
+    popover
+    class="menu dropdown mt-2 rounded-box rounded-md bg-base-300 shadow-sm"
+    @toggle="(event) => (event.newState === 'closed' ? (showInitialFocus = true) : null)"
+  >
+    <li class="pointer-events-none menu-title">
+      <h1 class="label text-base-content/70">{{ label }}</h1>
     </li>
-    <ul>
-      <li
-        v-for="filter in shownFilters"
-        :key="filter"
-        class="flex justify-between transition-colors"
-        @click="setFilter(filter)"
-      >
-        <label class="label flex-1" :class="{ 'bg-primary text-primary-content mt-1': isSelected(filter) }">{{
-          filter
-        }}</label>
-      </li>
-      <li v-if="hasFilters" class="text-sm w-full opacity-60 px-4 py-2 border-t border-base-300">
-        <label class="link cursor-pointer" @click="showAll = !showAll">
-          <div v-if="!showAll">See all</div>
-          <div v-else>See less</div>
-        </label>
-      </li>
-    </ul>
+    <li>
+      <ul>
+        <li v-for="(filter, index) in shownFilters" :key="filter" class="flex justify-between transition-colors">
+          <a
+            tabindex="0"
+            :autofocus="index === 0"
+            class="label flex-1 text-base-content/70"
+            :class="{
+              'mt-1 bg-primary text-primary-content': isSelected(filter),
+              'menu-focus': index === 0 && showInitialFocus,
+            }"
+            @blur="index === 0 ? (showInitialFocus = false) : null"
+            @click="setFilter(filter)"
+            @keydown.enter="setFilter(filter)"
+            @keydown.space.prevent="setFilter(filter)"
+          >
+            {{ filter }}
+          </a>
+        </li>
+        <li v-if="hasFilters" class="w-full border-t border-base-300 px-4 py-2 text-sm opacity-60">
+          <a
+            tabindex="0"
+            class="link cursor-pointer"
+            @click="showAll = !showAll"
+            @keydown.enter="showAll = !showAll"
+            @keydown.space.prevent="showAll = !showAll"
+          >
+            <span v-if="!showAll">See all</span>
+            <span v-else>See less</span>
+          </a>
+        </li>
+      </ul>
+    </li>
   </ul>
 </template>
 

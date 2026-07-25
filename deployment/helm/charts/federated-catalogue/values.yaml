@@ -1,8 +1,10 @@
 replicaCount: 1
 
 image:
-  repository: node-654e3bca7fbeeed18f81d7c7.ps-xaas.io/catalogue/fc-service-server
-  tag: "latest"
+  # Available FC service images:
+  # https://github.com/eclipse-xfsc/federated-catalogue/pkgs/container/federated-catalogue%2Ffc-service-server
+  repository: ghcr.io/eclipse-xfsc/federated-catalogue/fc-service-server
+  tag: "sha-c243a65"
   pullPolicy: IfNotPresent
 
 service:
@@ -47,6 +49,9 @@ security:
   enabled: true
 
 verifySignatures: false
+# VP/VC signature verification on self-description ingest.
+verificationVpSignature: false
+verificationVcSignature: false
 extraEnv: []
 
 resources:
@@ -55,13 +60,13 @@ resources:
     memory: 256Mi
   limits:
     cpu: 500m
-    memory: 512Mi
+    memory: 1Gi
 
 portal:
   enabled: false
   replicaCount: 1
   image:
-    repository: node-654e3bca7fbeeed18f81d7c7.ps-xaas.io/catalogue/fc-demo-portal
+    repository: ghcr.io/eclipse-xfsc/federated-catalogue/fc-demo-portal
     tag: "latest"
     pullPolicy: IfNotPresent
   service:

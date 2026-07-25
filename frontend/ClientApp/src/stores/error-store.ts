@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, type Ref } from 'vue'
+import { type Ref, ref } from 'vue'
 
 type ErrorType = 'error' | 'info'
 
@@ -13,7 +13,7 @@ export const useErrorStore = defineStore('error', () => {
   const errors: Ref<ErrorMessage[]> = ref([])
   let nextId = 0
 
-  function add(message: string, type: ErrorType = 'error', duration: number = 4000) {
+  function add(message: string, type: ErrorType = 'error', duration = 4000) {
     const id = nextId++
     errors.value.push({ id, type, message })
 

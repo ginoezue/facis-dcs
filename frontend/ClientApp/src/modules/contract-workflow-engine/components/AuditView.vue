@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import ContractAuditList from '@/components/lists/contract/ContractAuditList.vue'
-import type { ContractAuditResponse } from '@/models/responses/contract-response'
-import { contractWorkflowService } from '@/services/contract-workflow-service'
-import { ref, watch, type Ref } from 'vue'
-import { useContractEditorUiStore } from '../store/contractEditorUiStore'
+import { type Ref, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useContractEditorUiStore } from '@contract-workflow-engine/store/contractEditorUiStore'
+import ContractAuditList from '@/components/lists/contract/ContractAuditList.vue'
+import { contractWorkflowService } from '@/services/contract-workflow-service'
+import type { ContractAuditResponse } from '@/models/responses/contract-response'
 
 const route = useRoute()
 const editorStore = useContractEditorUiStore()
@@ -36,7 +36,7 @@ watch(
 </script>
 
 <template>
-  <div v-if="isLoading" class="loading loading-spinner loading-sm"></div>
+  <div v-if="isLoading" class="loading loading-sm loading-spinner"></div>
   <div v-else-if="data.length < 1">No audit data</div>
   <ContractAuditList v-else :audits="data" />
 </template>

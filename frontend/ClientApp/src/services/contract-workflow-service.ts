@@ -3,9 +3,11 @@ import type {
   ContractApproveRequest,
   ContractAuditRequest,
   ContractCreateRequest,
+  ContractDeployRequest,
   ContractHistoryRetrieveRequest,
   ContractNegotiationRequest,
   ContractNegotiationRespondRequest,
+  ContractOfferRequest,
   ContractRejectRequest,
   ContractRetrieveByIdRequest,
   ContractRetrieveRequest,
@@ -15,14 +17,17 @@ import type {
   ContractSubmitRequest,
   ContractTerminateRequest,
   ContractUpdateRequest,
-} from '@/models/requests/contract-requests'
+} from '@/models/requests/contract-request'
 import type {
+  ApprovedContractTemplateRetrieveResponse,
   ContractApproveResponse,
   ContractAuditResponse,
   ContractCreateResponse,
+  ContractDeployResponse,
   ContractHistoryResponse,
   ContractNegotiationRespondResponse,
   ContractNegotiationResponse,
+  ContractOfferResponse,
   ContractRejectResponse,
   ContractRetrieveByIdResponse,
   ContractRetrieveResponse,
@@ -44,6 +49,10 @@ export const contractWorkflowService: ContractWorkflowService = {
     return http.put<ContractUpdateResponse>('/contract/update', request).then((res) => res.data)
   },
 
+  async offer(request: ContractOfferRequest) {
+    return http.post<ContractOfferResponse>('/contract/offer', request).then((res) => res.data)
+  },
+
   async submit(request: ContractSubmitRequest) {
     return http.post<ContractSubmitResponse>('/contract/submit', request).then((res) => res.data)
   },
@@ -60,18 +69,28 @@ export const contractWorkflowService: ContractWorkflowService = {
     return http.get<ContractReviewResponse>('/contract/review', { params: request }).then((res) => res.data)
   },
 
-  async retrieve(_request?: ContractRetrieveRequest) {
+  async retrieve(request?: ContractRetrieveRequest) {
     return http
-      .get<ContractRetrieveResponse>('/contract/retrieve')
+      .get<ContractRetrieveResponse>('/contract/retrieve', { params: request })
       .then((res) => res.data)
-      .catch((err) => {
+      .catch((err: unknown) => {
         console.error('Retrieve Error:', err)
         return {
           contracts: [],
           review_tasks: [],
           approval_tasks: [],
           negotiation_tasks: [],
-        } as ContractRetrieveResponse
+        }
+      })
+  },
+
+  async retrieveApprovedTemplates() {
+    return http
+      .get<ApprovedContractTemplateRetrieveResponse>('/contract/templates')
+      .then((res) => res.data)
+      .catch((err: unknown) => {
+        console.error('Retrieve Error:', err)
+        return []
       })
   },
 
@@ -79,7 +98,7 @@ export const contractWorkflowService: ContractWorkflowService = {
     return http
       .get<ContractRetrieveByIdResponse>(`/contract/retrieve/${request.did}`)
       .then((res) => ({ ...res.data }))
-      .catch((err) => {
+      .catch((err: unknown) => {
         console.error('Retrieve ID Error:', err)
         return null
       })
@@ -89,7 +108,7 @@ export const contractWorkflowService: ContractWorkflowService = {
     return http
       .get<ContractSearchResponse>('/contract/search', { params: request })
       .then((res) => res.data)
-      .catch((err) => {
+      .catch((err: unknown) => {
         console.error('Search Error:', err)
         return []
       })
@@ -111,11 +130,15 @@ export const contractWorkflowService: ContractWorkflowService = {
     return http.post<ContractTerminateResponse>('/contract/terminate', request).then((res) => res.data)
   },
 
+  async deploy(request: ContractDeployRequest) {
+    return http.post<ContractDeployResponse>('/contract/deploy', request).then((res) => res.data)
+  },
+
   async audit(request: ContractAuditRequest) {
     return http
       .post<ContractAuditResponse>('/contract/audit', request)
       .then((res) => res.data)
-      .catch((err) => {
+      .catch((err: unknown) => {
         console.error('Audit Error:', err)
         return []
       })
@@ -125,9 +148,36 @@ export const contractWorkflowService: ContractWorkflowService = {
     return http
       .get<ContractHistoryResponse>(`/contract/history/${request.did}`)
       .then((res) => res.data ?? [])
-      .catch((err) => {
+      .catch((err: unknown) => {
         console.error('Retrieve Error:', err)
         return []
       })
+  },
+
+  async exportPdf(did: string): Promise<Blob> {
+    return http
+      .get<Blob>(`/pdf/export/contract/${encodeURIComponent(did)}`, { responseType: 'blob' })
+      .then((res) => res.data)
+  },
+
+  async exportBundle(did: string): Promise<Blob> {
+    return http
+      .get<Blob>(`/contract/export/${encodeURIComponent(did)}`, { responseType: 'blob' })
+      .then((res) => res.data)
+  },
+
+  async verifyPdf(did: string): Promise<{
+    match: boolean
+    jsonld_hash: string
+    base_pdf_hash: string
+    stored_base_pdf_hash: string
+    c2pa_manifest_found?: boolean
+    c2pa_signature_valid?: boolean
+    vc_proof_valid?: boolean
+    status_list_uri?: string
+    lifecycle_status?: string
+    status_list_status?: string
+  }> {
+    return http.get(`/pdf/verify/contract/${encodeURIComponent(did)}`).then((res) => res.data)
   },
 }

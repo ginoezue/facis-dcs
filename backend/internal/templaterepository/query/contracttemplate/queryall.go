@@ -1,9 +1,21 @@
+// Package contracttemplate implements read-side CQRS use cases scoped to a
+// single template (as opposed to the parent query package's cross-cutting
+// task queries).
 package contracttemplate
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
 	"digital-contracting-service/internal/base/datatype"
 	"digital-contracting-service/internal/base/datatype/componenttype"
+	"digital-contracting-service/internal/base/datatype/userrole"
 	"digital-contracting-service/internal/base/event"
 	"digital-contracting-service/internal/templaterepository/datatype/approvaltaskstate"
 	"digital-contracting-service/internal/templaterepository/datatype/contracttemplatestate"
@@ -11,47 +23,43 @@ import (
 	"digital-contracting-service/internal/templaterepository/datatype/reviewtaskstate"
 	"digital-contracting-service/internal/templaterepository/db"
 	templateevents "digital-contracting-service/internal/templaterepository/event"
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
 )
 
 type GetAllMetadataQry struct {
 	RetrievedBy string
+	HolderDID   string
+	Pagination  datatype.Pagination
+	UserRoles   userrole.UserRoles
 }
 
 type MetadataItem struct {
-	DID                string
-	DocumentNumber     *string
-	Version            int
-	State              contracttemplatestate.ContractTemplateState
-	TemplateType       contracttemplatetype.ContractTemplateType
-	Name               *string
-	Description        *string
-	CreatedBy          string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	ResponsiblePersons *db.ResponsiblePersons
-	MetaData           datatype.JSON
+	DID          string
+	Version      int
+	State        contracttemplatestate.ContractTemplateState
+	TemplateType contracttemplatetype.ContractTemplateType
+	Name         *string
+	Description  *string
+	CreatedBy    string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	MetaData     datatype.JSON
+	LatestDID    *string
 }
 
 type ReviewTaskItem struct {
-	DID            string
-	DocumentNumber *string
-	Version        int
-	State          reviewtaskstate.ReviewTaskState
-	Reviewer       string
-	CreatedAt      time.Time
+	DID       string
+	Version   int
+	State     reviewtaskstate.ReviewTaskState
+	Reviewer  string
+	CreatedAt time.Time
 }
 
 type ApprovalTaskItem struct {
-	DID            string
-	DocumentNumber *string
-	Version        int
-	State          approvaltaskstate.ApprovalTaskState
-	Approver       string
-	CreatedAt      time.Time
+	DID       string
+	Version   int
+	State     approvaltaskstate.ApprovalTaskState
+	Approver  string
+	CreatedAt time.Time
 }
 
 type GetAllMetadataResult struct {
@@ -73,16 +81,25 @@ func (h *GetAllMetadataHandler) Handle(ctx context.Context, query GetAllMetadata
 	if err != nil {
 		return nil, fmt.Errorf("could not create transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func(tx *sqlx.Tx) {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			log.Printf("could not rollback transaction: %v", err)
+		}
+	}(tx)
 
-	contractTemplates, err := h.CTRepo.ReadAllMetaData(ctx, tx)
-	if err != nil {
-		return nil, fmt.Errorf("could not read all contract templates: %w", err)
+	var contractTemplates []db.ContractTemplateMetadata
+	if query.Pagination.Limit >= 0 {
+		contractTemplates, err = h.CTRepo.ReadAllMetaData(ctx, tx, query.Pagination)
+		if err != nil {
+			return nil, fmt.Errorf("could not read all contract templates: %w", err)
+		}
 	}
 
 	evt := templateevents.RetrieveAllEvent{
 		RetrievedBy: query.RetrievedBy,
 		OccurredAt:  time.Now().UTC(),
+		HolderDID:   query.HolderDID,
+		UserRoles:   query.UserRoles,
 	}
 	err = event.Create(ctx, tx, evt, componenttype.ContractTemplateRepo)
 	if err != nil {
@@ -119,17 +136,16 @@ func (h *GetAllMetadataHandler) Handle(ctx context.Context, query GetAllMetadata
 		}
 
 		metadata := MetadataItem{
-			DID:                data.DID,
-			DocumentNumber:     data.DocumentNumber,
-			Version:            data.Version,
-			State:              state,
-			TemplateType:       templateType,
-			Name:               data.Name,
-			Description:        data.Description,
-			CreatedBy:          data.CreatedBy,
-			CreatedAt:          data.CreatedAt,
-			UpdatedAt:          data.UpdatedAt,
-			ResponsiblePersons: data.ResponsiblePersons,
+			DID:          data.DID,
+			Version:      data.Version,
+			State:        state,
+			TemplateType: templateType,
+			Name:         data.Name,
+			Description:  data.Description,
+			CreatedBy:    data.CreatedBy,
+			CreatedAt:    data.CreatedAt,
+			UpdatedAt:    data.UpdatedAt,
+			LatestDID:    data.LatestDID,
 		}
 		contractTemplatesItems = append(contractTemplatesItems, metadata)
 
@@ -145,20 +161,17 @@ func (h *GetAllMetadataHandler) Handle(ctx context.Context, query GetAllMetadata
 		}
 
 		metadata, exists := didToMetadata[data.DID]
-		var documentNumber *string
 		var version int
 		if exists {
-			documentNumber = metadata.DocumentNumber
 			version = metadata.Version
 		}
 
 		reviewTaskItems = append(reviewTaskItems, ReviewTaskItem{
-			DID:            data.DID,
-			State:          state,
-			DocumentNumber: documentNumber,
-			Version:        version,
-			Reviewer:       data.Reviewer,
-			CreatedAt:      data.CreatedAt,
+			DID:       data.DID,
+			State:     state,
+			Version:   version,
+			Reviewer:  data.Reviewer,
+			CreatedAt: data.CreatedAt,
 		})
 	}
 
@@ -171,20 +184,17 @@ func (h *GetAllMetadataHandler) Handle(ctx context.Context, query GetAllMetadata
 		}
 
 		metadata, exists := didToMetadata[data.DID]
-		var documentNumber *string
 		var version int
 		if exists {
-			documentNumber = metadata.DocumentNumber
 			version = metadata.Version
 		}
 
 		approvalTasksItems = append(approvalTasksItems, ApprovalTaskItem{
-			DID:            data.DID,
-			DocumentNumber: documentNumber,
-			Version:        version,
-			State:          state,
-			Approver:       data.Approver,
-			CreatedAt:      data.CreatedAt,
+			DID:       data.DID,
+			Version:   version,
+			State:     state,
+			Approver:  data.Approver,
+			CreatedAt: data.CreatedAt,
 		})
 	}
 

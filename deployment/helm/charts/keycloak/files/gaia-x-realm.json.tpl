@@ -36,6 +36,9 @@
           "name": "uma_protection"
         },
         {
+          "name": "ADMIN_ALL"
+        },
+        {
           "name": "Ro-MU-CA",
           "composite": true,
           "composites": {
@@ -43,91 +46,26 @@
               "federated-catalogue": [
                 "Ro-SD-A",
                 "Ro-PA-A",
-                "Ro-MU-A"
+                "Ro-MU-A",
+                "ADMIN_ALL"
               ]
             }
           }
         },
         {
           "name": "Ro-MU-A"
-        }
-      ],
-      "dcs-client": [
-        {
-          "name": "Template Creator",
-          "clientRole": true
         },
         {
-          "name": "Template Reviewer",
-          "clientRole": true
+          "name": "SCHEMA_CREATE"
         },
         {
-          "name": "Template Approver",
-          "clientRole": true
+          "name": "SCHEMA_READ"
         },
         {
-          "name": "Template Manager",
-          "clientRole": true
+          "name": "SCHEMA_UPDATE"
         },
         {
-          "name": "Contract Creator",
-          "clientRole": true
-        },
-        {
-          "name": "Contract Negotiator",
-          "clientRole": true
-        },
-        {
-          "name": "Contract Reviewer",
-          "clientRole": true
-        },
-        {
-          "name": "Contract Approver",
-          "clientRole": true
-        },
-        {
-          "name": "Contract Manager",
-          "clientRole": true
-        },
-        {
-          "name": "Contract Signer",
-          "clientRole": true
-        },
-        {
-          "name": "Contract Observer",
-          "clientRole": true
-        },
-        {
-          "name": "Sys. Contract Creator",
-          "clientRole": true
-        },
-        {
-          "name": "Sys. Contract Reviewer",
-          "clientRole": true
-        },
-        {
-          "name": "Sys. Contract Approver",
-          "clientRole": true
-        },
-        {
-          "name": "Sys. Contract Manager",
-          "clientRole": true
-        },
-        {
-          "name": "Sys. Contract Signer",
-          "clientRole": true
-        },
-        {
-          "name": "Archive Manager",
-          "clientRole": true
-        },
-        {
-          "name": "Auditor",
-          "clientRole": true
-        },
-        {
-          "name": "Compliance Officer",
-          "clientRole": true
+          "name": "SCHEMA_DELETE"
         }
       ]
     }
@@ -148,6 +86,27 @@
           "manage-users",
           "view-users",
           "view-clients"
+        ]
+      }
+    },
+    {
+      "username": "service-account-dcs-fc-client",
+      "enabled": true,
+      "serviceAccountClientId": "dcs-fc-client",
+      "realmRoles": [
+        "default-roles-gaia-x"
+      ],
+      "clientRoles": {
+        "federated-catalogue": [
+          "Ro-MU-A",
+          "Ro-SD-A",
+          "Ro-PA-A",
+          "Ro-MU-CA",
+          "SCHEMA_CREATE",
+          "SCHEMA_READ",
+          "SCHEMA_UPDATE",
+          "SCHEMA_DELETE",
+          "uma_protection"
         ]
       }
     },
@@ -174,27 +133,6 @@
           "Ro-SD-A",
           "Ro-PA-A",
           "Ro-MU-A"
-        ],
-        "dcs-client": [
-          "Template Creator",
-          "Template Reviewer",
-          "Template Approver",
-          "Template Manager",
-          "Contract Creator",
-          "Contract Negotiator",
-          "Contract Reviewer",
-          "Contract Approver",
-          "Contract Manager",
-          "Contract Signer",
-          "Contract Observer",
-          "Sys. Contract Creator",
-          "Sys. Contract Reviewer",
-          "Sys. Contract Approver",
-          "Sys. Contract Manager",
-          "Sys. Contract Signer",
-          "Archive Manager",
-          "Auditor",
-          "Compliance Officer"
         ]
       }
     },
@@ -221,27 +159,6 @@
           "Ro-SD-A",
           "Ro-PA-A",
           "Ro-MU-A"
-        ],
-        "dcs-client": [
-          "Template Creator",
-          "Template Reviewer",
-          "Template Approver",
-          "Template Manager",
-          "Contract Creator",
-          "Contract Negotiator",
-          "Contract Reviewer",
-          "Contract Approver",
-          "Contract Manager",
-          "Contract Signer",
-          "Contract Observer",
-          "Sys. Contract Creator",
-          "Sys. Contract Reviewer",
-          "Sys. Contract Approver",
-          "Sys. Contract Manager",
-          "Sys. Contract Signer",
-          "Archive Manager",
-          "Auditor",
-          "Compliance Officer"
         ]
       }
     },
@@ -268,27 +185,6 @@
           "Ro-SD-A",
           "Ro-PA-A",
           "Ro-MU-A"
-        ],
-        "dcs-client": [
-          "Template Creator",
-          "Template Reviewer",
-          "Template Approver",
-          "Template Manager",
-          "Contract Creator",
-          "Contract Negotiator",
-          "Contract Reviewer",
-          "Contract Approver",
-          "Contract Manager",
-          "Contract Signer",
-          "Contract Observer",
-          "Sys. Contract Creator",
-          "Sys. Contract Reviewer",
-          "Sys. Contract Approver",
-          "Sys. Contract Manager",
-          "Sys. Contract Signer",
-          "Archive Manager",
-          "Auditor",
-          "Compliance Officer"
         ]
       }
     },
@@ -315,27 +211,6 @@
           "Ro-SD-A",
           "Ro-PA-A",
           "Ro-MU-A"
-        ],
-        "dcs-client": [
-          "Template Creator",
-          "Template Reviewer",
-          "Template Approver",
-          "Template Manager",
-          "Contract Creator",
-          "Contract Negotiator",
-          "Contract Reviewer",
-          "Contract Approver",
-          "Contract Manager",
-          "Contract Signer",
-          "Contract Observer",
-          "Sys. Contract Creator",
-          "Sys. Contract Reviewer",
-          "Sys. Contract Approver",
-          "Sys. Contract Manager",
-          "Sys. Contract Signer",
-          "Archive Manager",
-          "Auditor",
-          "Compliance Officer"
         ]
       }
     },
@@ -362,27 +237,6 @@
           "Ro-SD-A",
           "Ro-PA-A",
           "Ro-MU-A"
-        ],
-        "dcs-client": [
-          "Template Creator",
-          "Template Reviewer",
-          "Template Approver",
-          "Template Manager",
-          "Contract Creator",
-          "Contract Negotiator",
-          "Contract Reviewer",
-          "Contract Approver",
-          "Contract Manager",
-          "Contract Signer",
-          "Contract Observer",
-          "Sys. Contract Creator",
-          "Sys. Contract Reviewer",
-          "Sys. Contract Approver",
-          "Sys. Contract Manager",
-          "Sys. Contract Signer",
-          "Archive Manager",
-          "Auditor",
-          "Compliance Officer"
         ]
       }
     },
@@ -409,27 +263,6 @@
           "Ro-SD-A",
           "Ro-PA-A",
           "Ro-MU-A"
-        ],
-        "dcs-client": [
-          "Template Creator",
-          "Template Reviewer",
-          "Template Approver",
-          "Template Manager",
-          "Contract Creator",
-          "Contract Negotiator",
-          "Contract Reviewer",
-          "Contract Approver",
-          "Contract Manager",
-          "Contract Signer",
-          "Contract Observer",
-          "Sys. Contract Creator",
-          "Sys. Contract Reviewer",
-          "Sys. Contract Approver",
-          "Sys. Contract Manager",
-          "Sys. Contract Signer",
-          "Archive Manager",
-          "Auditor",
-          "Compliance Officer"
         ]
       }
     },
@@ -456,27 +289,6 @@
           "Ro-SD-A",
           "Ro-PA-A",
           "Ro-MU-A"
-        ],
-        "dcs-client": [
-          "Template Creator",
-          "Template Reviewer",
-          "Template Approver",
-          "Template Manager",
-          "Contract Creator",
-          "Contract Negotiator",
-          "Contract Reviewer",
-          "Contract Approver",
-          "Contract Manager",
-          "Contract Signer",
-          "Contract Observer",
-          "Sys. Contract Creator",
-          "Sys. Contract Reviewer",
-          "Sys. Contract Approver",
-          "Sys. Contract Manager",
-          "Sys. Contract Signer",
-          "Archive Manager",
-          "Auditor",
-          "Compliance Officer"
         ]
       }
     }
@@ -564,38 +376,66 @@
       }
     },
     {
-      "clientId": "dcs-client",
+      "clientId": "dcs-fc-client",
       "enabled": true,
-      "publicClient": true,
-      "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": true,
-      "serviceAccountsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dcs-fc-client-secret",
+      "standardFlowEnabled": false,
+      "serviceAccountsEnabled": true,
+      "publicClient": false,
+      "frontchannelLogout": true,
+      "protocol": "openid-connect",
+      "attributes": {
+        "backchannel.logout.session.required": "true"
+      },
+      "fullScopeAllowed": true,
       "protocolMappers": [
         {
-          "name": "sub",
+          "name": "Client IP Address",
           "protocol": "openid-connect",
-          "protocolMapper": "oidc-sub-mapper",
+          "protocolMapper": "oidc-usersessionmodel-note-mapper",
           "consentRequired": false,
           "config": {
-            "access.token.claim": "true",
+            "user.session.note": "clientAddress",
             "id.token.claim": "true",
-            "userinfo.token.claim": "true"
+            "introspection.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "clientAddress",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "Client ID",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usersessionmodel-note-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.session.note": "client_id",
+            "id.token.claim": "true",
+            "introspection.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "client_id",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "Client Host",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usersessionmodel-note-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.session.note": "clientHost",
+            "id.token.claim": "true",
+            "introspection.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "clientHost",
+            "jsonType.label": "String"
           }
         }
       ],
-      "redirectUris": {{ toJson .Values.realm.dcsClient.redirectUris }},
-      "webOrigins": {{ toJson .Values.realm.dcsClient.webOrigins }},
-      "protocol": "openid-connect",
-      "frontchannelLogout": true,
-      "attributes": {
-        "post.logout.redirect.uris": "+"
-      },
       "defaultClientScopes": [
-        "web-origins",
-        "profile",
         "roles",
-        "email",
-        "gaia-x"
+        "dcs-fc-audience"
       ],
       "optionalClientScopes": [
         "offline_access"
@@ -784,6 +624,27 @@
       "attributes": {
         "include.in.token.scope": "true"
       }
+    },
+    {
+      "name": "dcs-fc-audience",
+      "description": "Allows dcs-fc-client tokens to access federated-catalogue APIs",
+      "protocol": "openid-connect",
+      "attributes": {
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "fc-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "federated-catalogue",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
     }
   ]
 }

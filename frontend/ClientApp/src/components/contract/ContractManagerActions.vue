@@ -1,12 +1,12 @@
 <script setup lang="ts">
+import { computed, normalizeClass, ref, useAttrs, useTemplateRef } from 'vue'
+import { useRouter } from 'vue-router'
+import { useContractPermissions } from '@contract-workflow-engine/composables/useContractPermissions'
 import ConfirmationModal from '@/components/ConfirmationModal.vue'
-import type { Contract } from '@/models/contract/contract'
 import { ROUTES } from '@/router/router'
 import { contractWorkflowService } from '@/services/contract-workflow-service'
-import { useAuthStore } from '@/stores/auth-store'
 import { ContractState } from '@/types/contract-state'
-import { computed, useAttrs, useTemplateRef } from 'vue'
-import { useRouter } from 'vue-router'
+import type { Contract } from '@/models/contract/contract'
 
 defineOptions({
   inheritAttrs: false,
@@ -14,8 +14,8 @@ defineOptions({
 
 const attrs = useAttrs()
 
-const filteredClass = computed(() =>
-  String(attrs.class || '')
+const filteredClass = computed(() => {
+  return normalizeClass(attrs.class)
     .split(' ')
     .filter(
       (cls) =>
@@ -23,8 +23,8 @@ const filteredClass = computed(() =>
           cls,
         ),
     )
-    .join(' '),
-)
+    .join(' ')
+})
 
 const props = defineProps<{
   contract: Contract
@@ -33,15 +33,59 @@ const props = defineProps<{
 const confirmationModal = useTemplateRef<InstanceType<typeof ConfirmationModal>>('confirmation-modal')
 
 const router = useRouter()
-const authStore = useAuthStore()
+const { isCreator, isManager } = useContractPermissions()
 
-const isManager = computed(() => {
-  return authStore.user?.roles?.includes('CONTRACT_MANAGER') ?? false
+// SRS DCS-IR-CWE-01 / §1.2 offer→acceptance lifecycle: only a Contract Creator
+// may transmit a DRAFT to the counterparty (EventOffer is allowed solely from
+// DRAFT — backend command/offer.go gates on the ContractCreator role + this
+// transition and derives the offerer from the caller's identity).
+const canOffer = computed(() => {
+  return isCreator.value && props.contract.state === ContractState.draft
 })
 
 const canTerminate = computed(() => {
-  return isManager && props.contract.state !== ContractState.terminated
+  return isManager.value && props.contract.state !== ContractState.terminated
 })
+
+const canDeploy = computed(() => {
+  return isManager.value && props.contract.state === ContractState.signed
+})
+
+const offering = ref(false)
+
+const offer = async () => {
+  if (!isCreator.value || props.contract.state !== ContractState.draft) return
+  offering.value = true
+  try {
+    await contractWorkflowService.offer({
+      did: props.contract.did,
+      updated_at: props.contract.updated_at,
+    })
+    router.go(0)
+  } catch (err) {
+    console.error('Offer failed:', err)
+  } finally {
+    offering.value = false
+  }
+}
+
+const deploying = ref(false)
+
+const deploy = async () => {
+  if (!isManager.value || props.contract.state !== ContractState.signed) return
+  deploying.value = true
+  try {
+    await contractWorkflowService.deploy({
+      did: props.contract.did,
+      updated_at: props.contract.updated_at,
+    })
+    router.go(0)
+  } catch (err) {
+    console.error('Deployment failed:', err)
+  } finally {
+    deploying.value = false
+  }
+}
 
 const terminate = async () => {
   try {
@@ -61,7 +105,7 @@ const terminate = async () => {
         reason: reason,
       })
       if (response.did) {
-        router.push({ name: ROUTES.CONTRACTS.LIST })
+        await router.push({ name: ROUTES.CONTRACTS.LIST })
       }
     }
   } catch (err) {
@@ -71,6 +115,12 @@ const terminate = async () => {
 </script>
 
 <template>
+  <button v-if="canOffer" :class="[filteredClass, 'btn-primary']" :disabled="offering" @click="offer">
+    {{ offering ? 'Offering…' : 'Offer to counterparty' }}
+  </button>
+  <button v-if="canDeploy" :class="[filteredClass, 'btn-primary']" :disabled="deploying" @click="deploy">
+    {{ deploying ? 'Deploying…' : 'Deploy' }}
+  </button>
   <button v-if="canTerminate" :class="[filteredClass, 'btn-error']" @click="terminate">Terminate</button>
   <ConfirmationModal ref="confirmation-modal" />
 </template>

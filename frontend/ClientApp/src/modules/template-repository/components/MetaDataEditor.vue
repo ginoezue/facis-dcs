@@ -1,44 +1,11 @@
-<template>
-  <div class="space-y-3">
-    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-100">
-      <table class="table table-sm">
-        <thead>
-          <tr>
-            <th class="w-1/4">Name</th>
-            <th>Value</th>
-            <th class="w-40 text-right">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          <!-- Add row -->
-          <MetaDataRow :key="addRowKey" :initial-name="draft.name" :initial-value="draft.value" :all-names="allNames"
-            :is-new="true" :is-active="activeIndex === -1" @confirm="createMeta" @cancel="resetDraft"
-            @delete="resetDraft" @row-focus="setActiveIndex(-1)" :is-editable="uiStore.isTemplateEditable" />
-
-          <!-- Small visual gap between add row and existing rows -->
-          <tr v-if="customMetaData.length">
-            <td colspan="3" class="h-1"></td>
-          </tr>
-
-          <!-- Existing rows -->
-          <MetaDataRow v-for="(meta, index) in customMetaData" :key="index" :initial-name="meta.name"
-            :initial-value="meta.value" :all-names="allNames" :index="index" :is-active="activeIndex === index"
-            @confirm="updateMeta(index, $event)" @delete="deleteMeta(index)" @row-focus="setActiveIndex(index)"
-            :is-editable="uiStore.isTemplateEditable" />
-        </tbody>
-      </table>
-    </div>
-  </div>
-</template>
-
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
 import { storeToRefs } from 'pinia'
-import { useTemplateDraftStore } from '@template-repository/store/templateDraftStore'
+import { computed, reactive, ref } from 'vue'
 import MetaDataRow from '@template-repository/components/meta-data/MetaDataRow.vue'
+import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
 import { useTemplateEditorUiStore } from '@template-repository/store/templateEditorUiStore'
 
-const store = useTemplateDraftStore()
+const store = useDcsDraftStore()
 const uiStore = useTemplateEditorUiStore()
 const { customMetaData } = storeToRefs(store)
 
@@ -50,7 +17,7 @@ const draft = reactive({
 })
 
 const addRowKey = ref(0)
-const activeIndex = ref<number | -1 | null>(null)
+const activeIndex = ref<number | null>(null)
 
 function resetDraft() {
   draft.name = ''
@@ -58,7 +25,7 @@ function resetDraft() {
   addRowKey.value += 1
 }
 
-function setActiveIndex(index: number | -1) {
+function setActiveIndex(index: number) {
   activeIndex.value = index
 }
 
@@ -77,3 +44,55 @@ function deleteMeta(index: number) {
   store.deleteMetaData(index)
 }
 </script>
+
+<template>
+  <div class="space-y-3">
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-100">
+      <table class="table table-sm">
+        <thead>
+          <tr class="text-base-content/70">
+            <th class="w-1/4">Name</th>
+            <th>Value</th>
+            <th class="w-40 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- Add row -->
+          <MetaDataRow
+            :key="addRowKey"
+            :initial-name="draft.name"
+            :initial-value="draft.value"
+            :all-names="allNames"
+            :is-new="true"
+            :is-active="activeIndex === -1"
+            :is-editable="uiStore.isTemplateEditable"
+            @confirm="createMeta"
+            @cancel="resetDraft"
+            @delete="resetDraft"
+            @row-focus="setActiveIndex(-1)"
+          />
+
+          <!-- Small visual gap between add row and existing rows -->
+          <tr v-if="customMetaData.length">
+            <td colspan="3" class="h-1"></td>
+          </tr>
+
+          <!-- Existing rows -->
+          <MetaDataRow
+            v-for="(meta, index) in customMetaData"
+            :key="index"
+            :initial-name="meta.name"
+            :initial-value="meta.value"
+            :all-names="allNames"
+            :index="index"
+            :is-active="activeIndex === index"
+            :is-editable="uiStore.isTemplateEditable"
+            @confirm="updateMeta(index, $event)"
+            @delete="deleteMeta(index)"
+            @row-focus="setActiveIndex(index)"
+          />
+        </tbody>
+      </table>
+    </div>
+  </div>
+</template>

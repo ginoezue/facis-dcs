@@ -1,17 +1,17 @@
-import { ROUTES } from '@/router/router'
 import { defineStore } from 'pinia'
-import { ref, type Ref } from 'vue'
-import { useRouter, type RouteLocationNormalized } from 'vue-router'
+import { type Ref, ref } from 'vue'
+import { type RouteLocationNormalized, useRouter } from 'vue-router'
+import { ROUTES } from '@/router/router'
 
 export const useNavStore = defineStore('nav', () => {
   const previousRoute: Ref<RouteLocationNormalized | null> = ref(null)
   const router = useRouter()
 
-  function goToPreviousRoute() {
+  async function goToPreviousRoute() {
     if (!previousRoute.value) {
-      router.push({ name: ROUTES.HOME })
+      await router.push({ name: ROUTES.HOME })
     } else {
-      router.push(previousRoute.value)
+      await router.push(previousRoute.value)
     }
   }
 

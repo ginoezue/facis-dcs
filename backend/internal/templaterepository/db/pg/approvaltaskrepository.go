@@ -1,12 +1,15 @@
+// Package pg is the Postgres implementation of the template repository's
+// repository interfaces (see db package doc).
 package pg
 
 import (
 	"context"
-	"digital-contracting-service/internal/templaterepository/db"
 	"errors"
 	"time"
 
 	"github.com/jmoiron/sqlx"
+
+	"digital-contracting-service/internal/templaterepository/db"
 )
 
 type PostgresApprovalTaskRepo struct {
@@ -39,7 +42,7 @@ func (r *PostgresApprovalTaskRepo) ReopenTasks(ctx context.Context, tx *sqlx.Tx,
 	return err
 }
 
-func (r *PostgresApprovalTaskRepo) ReadAll(ctx context.Context, tx *sqlx.Tx, did string) ([]db.ApprovalTaskData, error) {
+func (r *PostgresApprovalTaskRepo) ReadAllByDID(ctx context.Context, tx *sqlx.Tx, did string) ([]db.ApprovalTaskData, error) {
 	query := `
         SELECT id, did, state, approver,
                created_by, created_at

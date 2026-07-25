@@ -1,7 +1,7 @@
-import type { ContractState } from '@/types/contract-state'
 import type { ContractData } from '../contract-data'
 import type { ContractNegotiation } from './contract-negotiation'
-import type { ContractResponsiblePersons } from './contract-responsible-persons'
+import type { ContractResponsible } from './contract-responsible'
+import type { ContractState } from '@/types/contract-state'
 
 export const ExpirationPolicy = {
   renewal: 'RENEWAL',
@@ -10,6 +10,13 @@ export const ExpirationPolicy = {
 } as const
 
 export type ExpirationPolicy = (typeof ExpirationPolicy)[keyof typeof ExpirationPolicy]
+
+export interface ContractDeploymentKpi {
+  metric: string
+  value: string
+  observed_at: string
+  violation?: boolean
+}
 
 export interface Contract {
   did: string
@@ -24,12 +31,21 @@ export interface Contract {
   exp_date?: string
   exp_notice_period?: number
   exp_policy?: ExpirationPolicy
-  responsible_persons?: ContractResponsiblePersons
+  responsible?: ContractResponsible
   contract_data?: ContractData
   negotiations?: ContractNegotiation[]
+  outdated?: boolean
+  latest_template_did?: string
+  template_did?: string
+  template_version?: number
+  template_is_deprecated?: boolean
+  parent_contract_did?: string
+  /** KPI values reported via deployment callback (DCS-FR-CWE-31, DCS-FR-CWE-09) */
+  kpis?: ContractDeploymentKpi[]
+  /** Metric names whose latest reported value violates its contractual SLA threshold */
+  kpi_violations?: string[]
 }
 
-export type ContractChangeRequest = Pick<
-  Contract,
-  'name' | 'description' | 'exp_notice_period' | 'exp_policy'
-> & { contract_data?: Partial<Contract['contract_data']> }
+export type ContractChangeRequest = Pick<Contract, 'name' | 'description' | 'exp_notice_period' | 'exp_policy'> & {
+  contract_data?: Partial<Contract['contract_data']>
+}

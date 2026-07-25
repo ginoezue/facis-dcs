@@ -1,20 +1,19 @@
+import type { DcsTemplateData } from '../dcs-jsonld'
+import type { ContractTemplateActionFlag } from '@/types/contract-template-action-flag'
 import type { ContractTemplateState } from '@/types/contract-template-state'
 import type { TemplateType } from '@/types/template-type'
-import type { ContractTemplateActionFlag } from '../../types/contract-template-action-flag'
-import type { ContractTemplateData } from '../contract-template'
 
 export interface ContractTemplateCreateRequest {
   template_type: TemplateType
   name?: string
   description?: string
   /** The template data of the contract template */
-  template_data?: ContractTemplateData
+  template_data?: DcsTemplateData
 }
 
 export interface ContractTemplateCopyRequest {
   did: string
 }
-
 
 export interface ContractTemplateSubmitRequest {
   did: string
@@ -28,28 +27,26 @@ export interface ContractTemplateSubmitRequest {
 export interface ContractTemplateUpdateRequest {
   did: string
   updated_at: string
-  document_number?: string
   name?: string
   description?: string
   /** The template data of the contract template */
-  template_data?: ContractTemplateData
+  template_data?: DcsTemplateData
 }
 
 export interface ContractTemplateUpdateManageRequest {
   did: string
-  state?: ContractTemplateState
   updated_at: string
-  document_number?: string
   template_type?: TemplateType
   name?: string
   description?: string
   /** The template data of the contract template */
-  template_data?: ContractTemplateData
+  template_data?: DcsTemplateData
 }
 
 export interface ContractTemplateSearchRequest {
+  offset?: number
+  limit?: number
   did?: string
-  document_number?: string
   version?: number
   template_type?: TemplateType
   state?: ContractTemplateState
@@ -58,7 +55,10 @@ export interface ContractTemplateSearchRequest {
   filter?: string
 }
 
-export interface ContractTemplateRetrieveRequest {}
+export interface ContractTemplateRetrieveRequest {
+  offset?: number
+  limit?: number
+}
 
 export interface ContractTemplateRetrieveByIdRequest {
   did: string
@@ -88,10 +88,15 @@ export interface ContractTemplateArchiveRequest {
 
 export interface ContractTemplateRegisterRequest {
   did: string
-  updated_at: string
+  version?: number
 }
 
 export interface ContractTemplateAuditRequest {
+  did: string
+  updated_at: string
+}
+
+export interface ContractTemplatePublishRequest {
   did: string
   updated_at: string
 }

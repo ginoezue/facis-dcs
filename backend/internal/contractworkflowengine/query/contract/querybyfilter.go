@@ -2,18 +2,24 @@ package contract
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	event2 "digital-contracting-service/internal/contractworkflowengine/event"
+
+	"github.com/jmoiron/sqlx"
+
 	contractworkflowengine "digital-contracting-service/gen/contract_workflow_engine"
 	"digital-contracting-service/internal/base/datatype"
 	"digital-contracting-service/internal/base/datatype/componenttype"
+	"digital-contracting-service/internal/base/datatype/userrole"
 	"digital-contracting-service/internal/base/event"
 	"digital-contracting-service/internal/contractworkflowengine/datatype/contractstate"
 	"digital-contracting-service/internal/contractworkflowengine/datatype/expirationpolicy"
 	"digital-contracting-service/internal/contractworkflowengine/db"
-	templateevents "digital-contracting-service/internal/templaterepository/event"
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
 )
 
 type GetAllMetadataByFilterQry struct {
@@ -24,22 +30,26 @@ type GetAllMetadataByFilterQry struct {
 	Name            string
 	Description     string
 	ContractData    string
+	ParentDID       string
+	HolderDID       string
+	Pagination      datatype.Pagination
+	UserRoles       userrole.UserRoles
 }
 
 type GetAllMetadataByFilterResult struct {
-	DID                string
-	ContractVersion    int
-	State              contractstate.ContractState
-	Name               *string
-	Description        *string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	MetaData           datatype.JSON
-	StartDate          *time.Time
-	ExpDate            *time.Time
-	ExpPolicy          *expirationpolicy.ExpirationPolicy
-	ExpNoticePeriod    *int
-	ResponsiblePersons *db.ResponsiblePersons
+	DID             string
+	ContractVersion int
+	State           contractstate.ContractState
+	Name            *string
+	Description     *string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	MetaData        datatype.JSON
+	StartDate       *time.Time
+	ExpDate         *time.Time
+	ExpPolicy       *expirationpolicy.ExpirationPolicy
+	ExpNoticePeriod *int
+	Responsible     *db.Responsible
 }
 
 type GetAllMetaDataByFilterHandler struct {
@@ -53,7 +63,11 @@ func (h *GetAllMetaDataByFilterHandler) Handle(ctx context.Context, query GetAll
 	if err != nil {
 		return nil, fmt.Errorf("could not create transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func(tx *sqlx.Tx) {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			log.Printf("could not rollback transaction: %v", err)
+		}
+	}(tx)
 
 	var state string
 	if query.State != nil {
@@ -67,16 +81,19 @@ func (h *GetAllMetaDataByFilterHandler) Handle(ctx context.Context, query GetAll
 		Name:            query.Name,
 		Description:     query.Description,
 		ContractData:    query.ContractData,
+		ParentDID:       query.ParentDID,
 	}
 
-	contracts, err := h.CRepo.ReadAllMetaDataByFilter(ctx, tx, searchValues)
+	contracts, err := h.CRepo.ReadAllMetaDataByFilter(ctx, tx, searchValues, query.Pagination)
 	if err != nil {
 		return nil, fmt.Errorf("could not read all contract: %w", err)
 	}
 
-	evt := templateevents.SearchEvent{
+	evt := event2.SearchEvent{
 		RetrievedBy: query.RetrievedBy,
 		OccurredAt:  time.Now().UTC(),
+		HolderDID:   query.HolderDID,
+		UserRoles:   query.UserRoles,
 	}
 	err = event.Create(ctx, tx, evt, componenttype.ContractWorkflowEngine)
 	if err != nil {
@@ -106,18 +123,18 @@ func (h *GetAllMetaDataByFilterHandler) Handle(ctx context.Context, query GetAll
 		}
 
 		result[i] = GetAllMetadataByFilterResult{
-			DID:                data.DID,
-			ContractVersion:    data.ContractVersion,
-			State:              contractState,
-			Name:               data.Name,
-			Description:        data.Description,
-			CreatedAt:          data.CreatedAt,
-			UpdatedAt:          data.UpdatedAt,
-			StartDate:          data.StartDate,
-			ExpDate:            data.ExpDate,
-			ExpPolicy:          expPolicy,
-			ExpNoticePeriod:    data.ExpNoticePeriod,
-			ResponsiblePersons: data.ResponsiblePersons,
+			DID:             data.DID,
+			ContractVersion: data.ContractVersion,
+			State:           contractState,
+			Name:            data.Name,
+			Description:     data.Description,
+			CreatedAt:       data.CreatedAt,
+			UpdatedAt:       data.UpdatedAt,
+			StartDate:       data.StartDate,
+			ExpDate:         data.ExpDate,
+			ExpPolicy:       expPolicy,
+			ExpNoticePeriod: data.ExpNoticePeriod,
+			Responsible:     data.Responsible,
 		}
 	}
 

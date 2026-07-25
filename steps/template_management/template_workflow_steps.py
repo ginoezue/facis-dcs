@@ -3,6 +3,7 @@
 import requests
 from behave import given, then, when
 
+from core.utils import is_uuid
 from steps.support.services.template_service import TemplateService
 from steps.support.api_client import (
     template_archive_url,
@@ -16,6 +17,7 @@ from steps.support.api_client import (
     template_retrieve_by_id_url,
     template_search_url,
     template_submit_url,
+    template_update_manage_url,
     template_update_url,
     template_verify_url,
 )
@@ -23,7 +25,6 @@ from steps.support.services.auth_service import AuthService
 
 
 # Given
-# TODO: Refactor to reduce duplication in template creation and state transitions, e.g. by having a helper that creates a template and advances it to a specified state.
 
 @given('template "{name}" is in "Draft" status')
 def step_given_template_draft(context, name):
@@ -94,9 +95,11 @@ def step_given_templates_exist_with_name_and_description(context, name, title):
     did, updated_at = TemplateService.create_fresh_template(context, name, title=title)
     TemplateService.store_named(context, name, did, updated_at)
 
-@given('template "{name}" is approved and available')
-def step_given_template_approved_available(context, name):
-    did, updated_at = TemplateService.create_fresh_template(context)
+def _approve_named_template(context, name):
+    # Pass the scenario's template name through to the API — the catalogue
+    # search scenarios match on the template's REAL name in the Federated
+    # Catalogue self-description, not on the harness-side alias.
+    did, updated_at = TemplateService.create_fresh_template(context, name=name)
     updated_at = TemplateService.do_submit(context, did, updated_at)
     updated_at = TemplateService.do_recommend_for_approval(context, did, updated_at)
     headers = AuthService.get_headers_for_roles(["Template Approver"])
@@ -109,36 +112,61 @@ def step_given_template_approved_available(context, name):
     context.template_dids[name] = did
 
 
+@given('template "{name}" is approved and available')
+def step_given_template_approved_available(context, name):
+    # "available" for contract creation means REGISTERED — contract/create only
+    # accepts templates in REGISTERED/PUBLISHED state.
+    _approve_named_template(context, name)
+    _register_named_template(context, name)
+
+
 @given('template "{name}" is in "Approved" status')
 def step_given_template_approved_status(context, name):
+    # Approve only — scenarios using this Given transition FROM Approved
+    # (e.g. "Register approved template") and must not pre-register.
+    _approve_named_template(context, name)
+
+
+def _register_named_template(context, name):
+    """Flip an approved named template to REGISTERED via /template/register.
+
+    Archiving only yields DEPRECATED from REGISTERED/PUBLISHED (any other
+    state is hard-deleted — see backend/internal/templaterepository/command/
+    archive.go).
+    """
+    t = TemplateService.named(context, name)
+    manager_headers = AuthService.get_headers_for_roles(["Template Manager"])
+    register_resp = post_json(
+        context,
+        template_register_url(context),
+        {"did": t["did"], "updated_at": t["updated_at"]},
+        headers=manager_headers,
+    )
+    assert register_resp.status_code == 200, f"Template register failed: {register_resp.text}"
+    updated_at = TemplateService.fetch_template(context, t["did"], headers=manager_headers).get("updated_at")
+    TemplateService.store_named(context, name, t["did"], updated_at)
+
+
+@given('template "{name}" is in "Registered" status')
+def step_given_template_registered_status(context, name):
     step_given_template_approved_available(context, name)
+    _register_named_template(context, name)
 
 
 @given('template "{name}" is in "Deprecated" status')
 def step_given_template_deprecated_status(context, name):
-    did, updated_at = TemplateService.create_fresh_template(context)
-    updated_at = TemplateService.do_submit(context, did, updated_at)
-    updated_at = TemplateService.do_recommend_for_approval(context, did, updated_at)
-    approver_headers = AuthService.get_headers_for_roles(["Template Approver"])
-    approve_resp = post_json(
-        context,
-        template_approve_url(context),
-        {"did": did, "updated_at": updated_at},
-        headers=approver_headers,
-    )
-    assert approve_resp.status_code == 200, f"Template approve failed: {approve_resp.text}"
-    updated_at = TemplateService.fetch_template(context, did, headers=approver_headers).get("updated_at")
-
+    step_given_template_registered_status(context, name)
+    t = TemplateService.named(context, name)
     manager_headers = AuthService.get_headers_for_roles(["Template Manager"])
     archive_resp = post_json(
         context,
         template_archive_url(context),
-        {"did": did, "updated_at": updated_at},
+        {"did": t["did"], "updated_at": t["updated_at"]},
         headers=manager_headers,
     )
     assert archive_resp.status_code == 200, f"Template archive failed: {archive_resp.text}"
-    updated_at = TemplateService.fetch_template(context, did, headers=manager_headers).get("updated_at")
-    TemplateService.store_named(context, name, did, updated_at)
+    updated_at = TemplateService.fetch_template(context, t["did"], headers=manager_headers).get("updated_at")
+    TemplateService.store_named(context, name, t["did"], updated_at)
 
 
 # When
@@ -261,6 +289,25 @@ def step_when_submit_template(context, name, description):
         ua = TemplateService.fetch_template(context, t["did"]).get("updated_at", "draft")
         TemplateService.store_named(context, name, t["did"], ua)
 
+@when('I update manager metadata for template "{name}" with name "{new_name}" and legacy state "{state}"')
+def step_when_manager_updates_name_and_legacy_state(context, name, new_name, state):
+    t = TemplateService.named(context, name)
+    context.requests_response = post_json(
+        context,
+        template_update_manage_url(context),
+        {"did": t["did"], "updated_at": t["updated_at"], "name": new_name, "state": state},
+    )
+
+
+@when('I update manager metadata for template "{name}" with description "{description}"')
+def step_when_manager_updates_description(context, name, description):
+    t = TemplateService.named(context, name)
+    context.requests_response = post_json(
+        context,
+        template_update_manage_url(context),
+        {"did": t["did"], "updated_at": t["updated_at"], "description": description},
+    )
+
 @when('I submit template "{name}" for review without reviewers')
 def step_when_submit_template(context, name):
     t = TemplateService.named(context, name)
@@ -373,6 +420,26 @@ def step_when_search_templates(context, keyword):
         timeout=context.http_timeout_seconds,
     )
 
+@when('I am authenticated with roles: "{roles}"')
+def step_when_authenticated_with_roles(context, roles):
+    role_list = [role.strip() for role in roles.split(",")]
+    AuthService.set_headers_for_roles(context, role_list)
+
+@when('I try to search for templates with name "{name}" "{count}"')
+def step_when_search_templates(context, name, count):
+    for _ in range(int(count)):
+        context.requests_response = requests.get(
+            template_search_url(context),
+            params={"name": name},
+            headers=getattr(context, "headers", {}),
+            timeout=context.http_timeout_seconds,
+        )
+
+@when('the request is denied because of too many failed attempts')
+def step_when_denied_to_many_attempts(context):
+    response = context.requests_response.json()
+    assert context.requests_response.status_code in (401, 403) and "too many failed attempts" in response["message"], response
+
 @when('I search for templates with name "{name}"')
 def step_when_search_templates(context, name):
     context.requests_response = requests.get(
@@ -398,19 +465,6 @@ def step_when_search_templates(context, title):
         params={"template_data": title},
         headers=getattr(context, "headers", {}),
         timeout=context.http_timeout_seconds,
-    )
-
-
-@when('I retrieve template "{name}"')
-def step_when_retrieve_template(context, name):
-    t = TemplateService.named(context, name)
-    if not t or not t.get("did"):
-        # No Given seeded this template; auto-create as test data.
-        did, updated_at = TemplateService.create_fresh_template(context)
-        TemplateService.store_named(context, name, did, updated_at)
-        t = TemplateService.named(context, name)
-    context.requests_response = get_with_headers(
-        context, template_retrieve_by_id_url(context, t["did"])
     )
 
 
@@ -531,6 +585,16 @@ def step_then_template_status(context, expected_status):
     )
 
 
+
+
+@then('template "{name}" status remains "{expected_status}"')
+def step_then_template_status_remains(context, name, expected_status):
+    assert context.requests_response.status_code == 200, context.requests_response.text
+    t = TemplateService.named(context, name)
+    actual = TemplateService.fetch_template(context, t["did"]).get("state", "").upper()
+    assert actual == expected_status.upper(), (
+        f"Template state changed: expected '{expected_status.upper()}', got '{actual}'"
+    )
 @then('the template is available for contract generation')
 def step_then_template_available_for_generation(context):
     body = context.requests_response.json()
@@ -597,6 +661,8 @@ def step_then_template_assigned_uuid(context):
     body = context.requests_response.json()
     did = body.get("did")
     assert isinstance(did, str) and did.strip(), f"Expected identifier, got: {body}"
+    uuid = did.split(":")[-1]
+    assert is_uuid(uuid), f"Expected did {uuid} to be a valid UUID"
 
 
 @then('the template has a resolvable DID')

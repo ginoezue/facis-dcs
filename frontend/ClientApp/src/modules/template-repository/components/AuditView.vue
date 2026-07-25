@@ -1,15 +1,14 @@
 <script setup lang="ts">
-import { contractTemplateService } from '@/services/contract-template-service'
-import { useTemplateDraftStore } from '../store/templateDraftStore'
-import { ref, watch, type Ref } from 'vue'
-import { useTemplateEditorUiStore } from '../store/templateEditorUiStore'
-import type { ContractTemplateAuditResponse } from '@/models/responses/template-response'
+import { type Ref, ref, watch } from 'vue'
+import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
+import { useTemplateEditorUiStore } from '@template-repository/store/templateEditorUiStore'
 import TemplateAuditList from '@/components/lists/template/TemplateAuditList.vue'
+import { contractTemplateService } from '@/services/contract-template-service'
+import type { ContractTemplateAuditResponse } from '@/models/responses/template-response'
 
-const store = useTemplateDraftStore()
+const store = useDcsDraftStore()
 const editorStore = useTemplateEditorUiStore()
 const data: Ref<ContractTemplateAuditResponse> = ref([])
-
 
 const isLoading = ref(false)
 
@@ -39,7 +38,7 @@ watch(
 </script>
 
 <template>
-  <div v-if="isLoading" class="loading loading-spinner loading-sm"></div>
+  <div v-if="isLoading" class="loading loading-sm loading-spinner"></div>
   <div v-else-if="data.length < 1">No audit data</div>
   <TemplateAuditList v-else :audits="data" />
 </template>

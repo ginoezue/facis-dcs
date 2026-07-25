@@ -1,91 +1,95 @@
-@UC-04-03 @FR-SM-18 @FR-SM-21 @FR-SM-11
-@skip
-Feature: Signature Validation
-  The system validates counterparty signatures for cryptographic
-  integrity and compliance with legal and organizational policies,
-  including linked machine-readable and human-readable signatures.
+# Signature validate/audit/compliance (DCS-FR-SM-18, DCS-FR-SM-19,
+# DCS-FR-SM-21, UC-04): POST /signature/validate, GET /signature/audit,
+# POST /signature/compliance (backend/design/signature_management.go). All
+# three are already implemented; only /signature/verify (contract integrity &
+# envelope check, used as a setup step by other packs) and /signature/apply
+# (the signing ceremony itself, covered by 22_real_signing_vertical) had
+# scenario coverage before this file.
 
-  Scenario: Validate counterparty signature cryptographic integrity
-    Given I am authenticated with roles: "Contract Signer"
-    And contract "Partnership Agreement" has a counterparty signature
-    When I validate the counterparty signature on contract "Partnership Agreement"
-    Then the cryptographic integrity is confirmed
-    And the signature matches the registered signer
-    And the document is confirmed unaltered
+@UC-04 @DCS-FR-SM-18 @DCS-FR-SM-19 @DCS-FR-SM-21
+Feature: Signature validation, audit, and compliance
 
-  Scenario: Validate signature credential status
-    Given I am authenticated with roles: "Contract Manager"
-    And contract "Service Agreement" has a counterparty signature
-    When I validate the counterparty signature on contract "Service Agreement"
-    Then the signer credential status is checked against the status list
-    And the validation result includes credential status and timestamp
+  @clean_db @DCS-FR-SM-18
+  Scenario: Contract Manager validates a signed contract's signature
+    Given contract "Signature Validation Contract" has reached contract state "SIGNED"
+    When the contract manager validates the signature for contract "Signature Validation Contract"
+    Then get http 200:Success code
+    And the signature validation for contract "Signature Validation Contract" reports only passing checks
 
-  Scenario: Signature compliance verification against policies
-    Given I am authenticated with roles: "Contract Manager"
-    And contract "Regulated Agreement" has signatures applied
-    When I verify signature compliance for contract "Regulated Agreement"
-    Then each signature is assessed against legal signature policies
-    And the assessment includes signature type, credential status, and role
-    And any policy violations are flagged
+  @clean_db @DCS-FR-SM-19
+  Scenario: Signature audit log records the apply-signature action
+    Given contract "Signature Audit Contract" has reached contract state "SIGNED"
+    When the contract manager validates the signature for contract "Signature Audit Contract"
+    Then get http 200:Success code
+    # APPLIED_SIGNATURE is the event the apply command actually emits
+    # (signingmanagement/event/event.go); the APPLY_SIGNATURE constant in
+    # eventtype.go is defined but never published.
+    And the signature audit log for contract "Signature Audit Contract" includes an action of type "APPLIED_SIGNATURE"
 
-  Scenario: Detect non-compliant signature type
-    Given I am authenticated with roles: "Contract Manager"
-    And contract "High-Security Agreement" requires QES signatures
-    And a signature of type "AES" has been applied
-    When I verify signature compliance for contract "High-Security Agreement"
-    Then the system flags "Signature type does not meet QES requirement"
+  # /signature/compliance computes its findings (DCS-FR-SM-21:
+  # signature level SES/AES/QES, signature status, active signed
+  # credentials) and records the check — findings included — as a
+  # ComplianceValidationEvent in the audit trail.
+  @clean_db @DCS-FR-SM-21
+  Scenario: Contract Manager requests a compliance check for a signed contract
+    Given contract "Signature Compliance Contract" has reached contract state "SIGNED"
+    When the contract manager requests a compliance check for contract "Signature Compliance Contract"
+    Then get http 200:Success code
+    And the compliance check for contract "Signature Compliance Contract" reports that all checks passed
 
-  Scenario: Export validation results for compliance
-    Given I am authenticated with roles: "Contract Manager"
-    And contract "Service Agreement" has completed signature validation
-    When I export validation results for contract "Service Agreement"
-    Then I receive an exportable validation report
-    And the report includes credential status, integrity proof, and timestamps
+  @clean_db @DCS-FR-SM-21 @DCS-FR-SM-20
+  Scenario: The compliance check flags a revoked signature
+    Given contract "Revoked Compliance Contract" has reached contract state "SIGNED"
+    When the applied signature of contract "Revoked Compliance Contract" is revoked
+    Then get http 200:Success code
+    When the contract manager requests a compliance check for contract "Revoked Compliance Contract"
+    Then get http 200:Success code
+    And the compliance check for contract "Revoked Compliance Contract" flags a revoked signature
 
-  Scenario: Reject tampered document during validation
-    Given I am authenticated with roles: "Contract Signer"
-    And contract "Tampered Agreement" has been modified after signing
-    When I validate the counterparty signature on contract "Tampered Agreement"
-    Then the validation fails
-    And I receive error "Document integrity check failed"
+  # DCS-FR-SM-26 / DCS-IR-SM-05: the Signature Compliance Viewer's data —
+  # per-signature signer identity, credential class, status, timestamps,
+  # container format, and the contract's cryptographic integrity findings.
+  @clean_db @DCS-FR-SM-26 @DCS-IR-SM-05
+  Scenario: The signature view exposes signer identity, credential class, timestamp, and integrity
+    Given contract "Signature View Contract" has reached contract state "SIGNED"
+    When the signature view for contract "Signature View Contract" is requested as "Compliance Officer"
+    Then get http 200:Success code
+    And the signature view for contract "Signature View Contract" shows one "SIGNED" signature with signer identity, credential class "AES", timestamp, and intact integrity
 
-  Scenario: Unauthorized role cannot validate signatures
-    Given I am authenticated with roles: "Contract Observer"
-    And contract "Service Agreement" has a counterparty signature
-    When I attempt to validate the counterparty signature on contract "Service Agreement"
-    Then the request is denied with an authorization error
+  @clean_db @DCS-FR-SM-26
+  Scenario: A role outside the signature-viewing scope cannot request the signature view
+    Given contract "Unauthorized Signature View Contract" has reached contract state "SIGNED"
+    And I am authenticated with roles: "Template Creator"
+    When I attempt to request the signature view for contract "Unauthorized Signature View Contract" with my current role
+    Then the request is denied with a client error
 
-  # FR-SM-11: Linked Machine-Readable and Human-Readable Signatures
-  Scenario: Validate linked MR and HR signature binding
-    Given I am authenticated with roles: "Contract Manager"
-    And contract "Dual Format Agreement" has machine-readable and human-readable versions
-    And both versions have been signed
-    When I validate signature linking for contract "Dual Format Agreement"
-    Then the MR signature is confirmed linked to the HR signature
-    And both signatures reference the same signer credentials
-    And the binding hash is verified
+  # DCS-FR-SM-27: signed contracts MUST be exportable in PDF/A format with
+  # embedded metadata and signature containers. pdf-core compiles PDF/A-3A
+  # (pdfaid:part=3, pdfaid:conformance=A, ISO 19005-3) with the canonical
+  # JSON-LD payload embedded as an associated file (AFRelationship /Source) —
+  # asserted here on the actual exported bytes of a SIGNED contract.
+  @clean_db @DCS-FR-SM-27 @UC-04
+  Scenario: A signed contract exports as PDF/A with embedded metadata containers
+    Given contract "PDFA Signed Contract" has reached contract state "SIGNED"
+    And I am authenticated with roles: "Contract Manager"
+    And contract "PDFA Signed Contract" has an exported PDF
+    Then the exported PDF for contract "PDFA Signed Contract" declares PDF/A-3 conformance in its XMP metadata
+    And the exported PDF for contract "PDFA Signed Contract" embeds the canonical JSON-LD payload as an associated file
 
-  Scenario: Detect signature mismatch between MR and HR versions
-    Given I am authenticated with roles: "Contract Manager"
-    And contract "Mismatched Agreement" has separate MR and HR signatures
-    And the signatures are not properly linked
-    When I validate signature linking for contract "Mismatched Agreement"
-    Then the validation fails
-    And I receive error "Machine-readable and human-readable signatures are not linked"
-
-  Scenario: Validate unified signature covers both representations
-    Given I am authenticated with roles: "Contract Signer"
-    And contract "Unified Agreement" has a single signature covering both formats
-    When I validate the signature on contract "Unified Agreement"
-    Then the signature is confirmed to cover the machine-readable content
-    And the signature is confirmed to cover the human-readable content
-    And the content hash binding is verified
-
-  Scenario: Cross-verify MR and HR content integrity via signatures
-    Given I am authenticated with roles: "Auditor"
-    And contract "Cross-Verified Agreement" has linked MR and HR signatures
-    When I perform cross-verification for contract "Cross-Verified Agreement"
-    Then the MR content hash matches the signature reference
-    And the HR content hash matches the signature reference
-    And any discrepancies between representations are flagged
-
+  # DECISION-ANCHORED SKIP (not a test limitation): the EU distributes the
+  # DSS demonstration webapp as a ZIP/WAR with NO official container image,
+  # so deployment/helm/charts/dss wraps a pinned community image and stays
+  # DISABLED by default — enabling an unofficial third-party image in the
+  # hermetic CI deployment is not defensible. The integration itself is
+  # implemented and unit-tested (backend/internal/signingmanagement/dss:
+  # report parsing, and the hard-fail when a CONFIGURED DSS is unreachable —
+  # a configured external validator is never silently skipped); flipping
+  # dss.enabled plus the backend's DSS_URL env activates this scenario's
+  # behavior without code changes.
+  @skip @DCS-FR-SM-18 @DCS-IR-SI-10 @DCS-IR-CI-08
+  Scenario: Signature validation reports the EU DSS indication when a DSS instance is deployed
+    Given contract "DSS Validated Contract" has reached contract state "SIGNED"
+    And an EU DSS instance is deployed and configured via DSS_URL
+    When the contract manager validates the signature for contract "DSS Validated Contract"
+    Then get http 200:Success code
+    And the signature validation findings include an EU DSS validation report indication

@@ -5,20 +5,38 @@ dependencies:
 - name: keycloak
   repository: file://charts/keycloak
   version: 0.1.0
+- name: hydra
+  repository: file://charts/hydra
+  version: 0.1.0
 - name: nats
   repository: file://charts/nats
   version: 0.1.0
 - name: neo4j
   repository: file://charts/neo4j
   version: 0.1.0
+- name: orce
+  repository: file://charts/orce
+  version: 0.1.0
+- name: dss
+  repository: file://charts/dss
+  version: 0.1.0
 - name: federated-catalogue
   repository: file://charts/federated-catalogue
   version: 0.1.0
-- name: custom-policy-agent
-  repository: file://charts/custom-policy-agent
+- name: ipfs
+  repository: file://charts/ipfs
   version: 0.1.0
-- name: mongodb
-  repository: file://charts/mongodb
+- name: ipfs-document-manager
+  repository: file://charts/ipfs-document-manager
   version: 0.1.0
-digest: sha256:e4bcac554f5731581fdc79d84d32703d86de70c6f7c35588df5d89f8451712d1
-generated: "2026-05-05T14:17:26.6414069+02:00"
+- name: statuslist-service
+  repository: file://charts/statuslist-service
+  version: 0.1.0
+- name: kube-prometheus-stack
+  repository: https://prometheus-community.github.io/helm-charts
+  version: 85.2.0
+- name: traefik
+  repository: https://traefik.github.io/charts
+  version: 41.0.0
+digest: sha256:f1590ae201fcab7adf52390c94a730559bcdbe14672bf3e470918367243c2be7
+generated: "2026-07-14T17:47:10.915206287+02:00"

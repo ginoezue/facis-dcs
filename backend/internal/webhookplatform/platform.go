@@ -11,8 +11,8 @@ import (
 // CallbackHandler is called when ORCE sends a callback after processing a webhook.
 type CallbackHandler func(ctx context.Context, pending PendingCallback, status string, result json.RawMessage)
 
-// TokenValidator validates a Bearer token and returns the caller's username.
-type TokenValidator func(ctx context.Context, token string) (username string, err error)
+// TokenValidator validates a Bearer token and returns the caller's holderDID.
+type TokenValidator func(ctx context.Context, token string) (holderDID string, err error)
 
 // Platform is the webhook subscription HTTP handler.
 // Mount it on any path prefix with http.StripPrefix.
@@ -25,7 +25,7 @@ type Platform struct {
 }
 
 // New creates a ready-to-use Platform.
-// validate:   JWT validator — use middleware.OIDCValidator.ValidateToken
+// validate:   JWT validator — use middleware.HydraJWTValidator.ValidateToken
 // onCallback: called when ORCE POSTs to /callbacks (may be nil)
 func New(store *SubscriptionStore, dispatcher *Dispatcher, validate TokenValidator, onCallback CallbackHandler) *Platform {
 	p := &Platform{
@@ -57,6 +57,7 @@ func (p *Platform) routes() {
 	p.mux.HandleFunc("POST /webhooks", p.auth(p.subscribe))
 	p.mux.HandleFunc("DELETE /webhooks/{id}", p.auth(p.unsubscribe))
 	p.mux.HandleFunc("POST /callbacks", p.auth(p.callback))
+	p.mux.HandleFunc("GET /deliveries", p.auth(p.listDeliveries))
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────────
@@ -71,21 +72,21 @@ func (p *Platform) auth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		token := strings.TrimPrefix(header, "Bearer ")
 
-		username, err := p.validate(r.Context(), token)
+		holderDID, err := p.validate(r.Context(), token)
 		if err != nil {
 			jsonError(w, http.StatusUnauthorized, "invalid token: "+err.Error())
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), ctxKeyUsername{}, username)
+		ctx := context.WithValue(r.Context(), ctxKeyHolderDID{}, holderDID)
 		next(w, r.WithContext(ctx))
 	}
 }
 
-type ctxKeyUsername struct{}
+type ctxKeyHolderDID struct{}
 
-func usernameFromCtx(ctx context.Context) string {
-	v, _ := ctx.Value(ctxKeyUsername{}).(string)
+func holderDIDFromCtx(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyHolderDID{}).(string)
 	return v
 }
 
@@ -103,6 +104,12 @@ func (p *Platform) listEvents(w http.ResponseWriter, r *http.Request) {
 // GET /webhooks
 func (p *Platform) listWebhooks(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, p.store.ListAll())
+}
+
+// GET /deliveries — recent notification outcomes (status code / error /
+// acknowledged), the monitoring surface for DCS-FR-TR-22 subscribers.
+func (p *Platform) listDeliveries(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, p.store.ListDeliveries())
 }
 
 // POST /webhooks
@@ -127,7 +134,7 @@ func (p *Platform) subscribe(w http.ResponseWriter, r *http.Request) {
 
 	sub := p.store.Add(req.Event, req.CallbackURL, req.Secret)
 	log.Printf("webhookplatform: new subscription id=%s event=%s url=%s caller=%s",
-		sub.ID, sub.Event, sub.CallbackURL, usernameFromCtx(r.Context()))
+		sub.ID, sub.Event, sub.CallbackURL, holderDIDFromCtx(r.Context()))
 
 	w.WriteHeader(http.StatusCreated)
 	jsonOK(w, sub)
@@ -141,7 +148,7 @@ func (p *Platform) unsubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("webhookplatform: deleted subscription id=%s caller=%s",
-		id, usernameFromCtx(r.Context()))
+		id, holderDIDFromCtx(r.Context()))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -168,7 +175,7 @@ func (p *Platform) callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("webhookplatform: callback received event_id=%s event=%s did=%s status=%s caller=%s",
-		req.EventID, pending.Event, pending.DID, req.Status, usernameFromCtx(r.Context()))
+		req.EventID, pending.Event, pending.DID, req.Status, holderDIDFromCtx(r.Context()))
 
 	if p.onCallback != nil {
 		go p.onCallback(r.Context(), pending, req.Status, req.Result)
@@ -181,13 +188,17 @@ func (p *Platform) callback(w http.ResponseWriter, r *http.Request) {
 
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("webhookplatform: failed to encode JSON response: %v", err)
+	}
 }
 
 func jsonError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	if err := json.NewEncoder(w).Encode(map[string]string{"error": msg}); err != nil {
+		log.Printf("webhookplatform: failed to encode JSON error response: %v", err)
+	}
 }
 
 func isKnownEvent(name string) bool {

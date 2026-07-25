@@ -29,6 +29,9 @@ service:
   type: ClusterIP
   port: 8991
 
+serviceMonitor:
+  enabled: false
+
 ingress:
   enabled: false
   className: ""
@@ -36,6 +39,9 @@ ingress:
   pathType: Prefix
   hosts: []
   tls: []
+
+traefik:
+  enabled: false
 
 # Istio VirtualService (optional)
 istio:
@@ -54,6 +60,13 @@ autoscaling:
 volumes: []
 volumeMounts: []
 
+oid4vp:
+  trust:
+    enabled: true
+    # Baked into the container image (see deployment/docker/Dockerfile).
+    dataPath: /app/config/oid4vp/trust.dev.json
+    xfscAllowUnsignedFallback: false
+
 customCA:
   enabled: false
   configMapName: ""
@@ -66,27 +79,52 @@ affinity: {}
 extraEnv: []
 extraEnvFrom: []
 
+# Archive notary / ORCE integration
+archiveNotary:
+  baseURL: ""
+  notaryPath: "/archive/notary"
+  auditLogPath: "/archive-audit-events.jsonl"
+  auditLogBearerToken: ""
+  auditLogBearerTokenSecretRef:
+    name: ""
+    key: "ORCE_ARCHIVE_AUDIT_LOG_BEARER_TOKEN"
+
+global:
+  archiveAuditToken: ""
+  archiveAuditTokenSecretRef:
+    name: ""
+    key: "ORCE_ARCHIVE_AUDIT_LOG_BEARER_TOKEN"
+
 # Route and path configuration
 route:
   basePath: "/digital-contracting-service"
+  publicBaseURL: ""
+  # Explicit override for the did:web hostname (see the 'didHostname' helper
+  # in _helpers.tpl). Empty falls back to publicBaseURL's host. Only needed
+  # when the did:web identifier's hostname differs from publicBaseURL's host
+  # (e.g. a cluster-routable hostname resolved via a CoreDNS rewrite rather
+  # than being the literal ingress host, as in the BDD two-instance suite).
+  didHostname: ""
 
 # Override individual paths (derived from route.basePath if not set)
 paths:
   api: ""
   ui: ""
 
-# OIDC / authentication
-# issuerURL is derived from keycloak.route.path + istio/ingress host when not set explicitly
-oidc:
-  issuerURL: ""
-  clientID: "[oidc-client-id]"
-  redirectURI: "[oidc-redirect-uri]"
-  logoutRedirectURI: "[oidc-logout-redirect-uri]"
-  realm: "gaia-x"
-  keycloakScheme: "https"
-  issuerURLSecretRef:
-    name: ""
-    key: "OIDC_ISSUER_URL"
+# DID identity Secret mount (DCS_DID). Disabled by default: most deployments
+# derive their signing identity from the PKCS#11 token directly. Enabled by
+# the BDD kind harness, where a post-install hsm-provision Job publishes
+# did.json (freshly derived from the in-cluster SoftHSM2 token key) into the
+# Secret named by the 'identitySecretName' helper.
+identity:
+  enabled: false
+  # Override the auto-derived <fullname>-identity Secret name.
+  secretName: ""
+  mountPath: "/app/identity"
+
+# Keycloak realm URL for Federated Catalogue.
+fcKeycloak:
+  realmURL: ""
 
 # Database connection – derived from the postgresql sub-chart when not set explicitly
 database:
@@ -115,6 +153,55 @@ serviceDiscovery:
   natsHost: ""
   keycloakPort: ""
 
+# ---- Signing / C2PA provenance ----------------------------------------
+# DCS never holds raw private keys (DCS-IR-HI-01): every key lives in the
+# PKCS#11 token configured under `pkcs11` below.
+
+signing:
+  # DID of this DCS instance (embedded in C2PA lifecycle assertions as authority).
+  issuerDID: ""
+  issuerDIDSecretRef:
+    name: ""
+    key: "ISSUER_DID"
+
+  # RFC 3161 Timestamp Authority (optional; activates real timestamps on C2PA manifests).
+  tsaURL: ""
+  # Optional: Secret (key tsa-cert.pem) holding the TSA certificate to trust
+  # for RFC3161 token verification, overriding the embedded certs/tsa.crt
+  # (mounted at /etc/dcs/tsa-trust, wired as TSA_TRUST_CERT_FILE).
+  tsaTrustCertSecret: ""
+
+# ---- PKCS#11 signing token (DCS-IR-HI-01) -----------------------------
+# Every private key is held in a PKCS#11 token. With provisioning.enabled a
+# SoftHSM2 software token is co-deployed and provisioned in-cluster — this is a
+# dev/staging/CI convenience ONLY and is NOT a production HSM. For production,
+# set provisioning.enabled=false and point modulePath/tokenLabel/pinSecretRef at
+# a real external PKCS#11 module (its keys must already exist in the token).
+pkcs11:
+  modulePath: "/usr/lib/softhsm/libsofthsm2.so"
+  tokenLabel: "dcs"
+  # PIN for the auto-created Secret. Ignored when pinSecretRef.name is set.
+  pin: "1234"
+  pinSecretRef:
+    name: ""
+    key: "PKCS11_PIN"
+  provisioning:
+    enabled: true
+    # Volume path holding the SoftHSM2 token directory + softhsm2.conf.
+    tokenDir: "/var/lib/softhsm"
+    # SO (security officer) PIN used only during token initialization.
+    soPin: "12345678"
+    persistence:
+      size: "128Mi"
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: ""
+    # Provisioning job image; defaults to the DCS image, which bundles
+    # softhsm2/opensc/openssl and the provisioning scripts.
+    image:
+      repository: ""
+      tag: ""
+      pullPolicy: IfNotPresent
+
 # ---- Co-deployed dependencies ----------------------------------------
 # Each sub-chart owns its full set of configurable values.
 # Only fields referenced by the parent chart's helpers are listed here.
@@ -135,11 +222,58 @@ keycloak:
   route:
     path: ""
 
+hydra:
+  enabled: false
+  clients: []
+
+# SRS System User clients (SRS §2.4 Table 5), each authenticating with the
+# OAuth2 client credentials grant against this deployment's Hydra. Empty means
+# no machine caller is accepted at all. Every entry needs a client_id that also
+# exists under hydra.clients, a participant_did its actions are attributed to,
+# and the DCS roles it may exercise.
+systemClients: []
+
 nats:
   enabled: false
 
 neo4j:
   enabled: false
+
+# BDD only: loopback proxy so DCS Pod fetches localhost statusListCredential via Traefik ingress.
+statusListLocalhostProxy:
+  enabled: false
+  image:
+    repository: nginx
+    tag: alpine
+    pullPolicy: IfNotPresent
+  listenPort: 18080
+  upstream: ""
+  ingressHost: localhost
+
+# XFSC Status List Service (DCS-OR-C2PA-005)
+# Manages verifiable credential status lists (Status List 2021/2023 format).
+# When enabled, STATUSLIST_SERVICE_URL is auto-derived and wired into DCS.
+# See charts/statuslist-service/values.yaml for all configurable fields.
+statuslistService:
+  enabled: false
+  # url overrides the auto-wired ClusterIP URL when enabled=true.
+  url: ""
+  # tenantID is the tenant identifier passed as STATUSLIST_TENANT_ID (defaults to "default" when empty).
+  tenantID: ""
+  image:
+    repository: node-654e3bca7fbeeed18f81d7c7.ps-xaas.io/ocm-wstack/status-list-service
+    tag: "main"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
 
 # XFSC Federated Catalogue (requires neo4j, keycloak, postgresql with "fc" database)
 # See charts/federated-catalogue/values.yaml for all configurable fields.
@@ -150,6 +284,7 @@ federatedCatalogue:
   secretRef:
     name: ""
     key: "FEDERATED_CATALOGUE_API_URL"
+<<<<<<< HEAD
 
 # XFSC Custom Policy Agent (OPA-based policy evaluation)
 # See charts/custom-policy-agent/values.yaml for all configurable fields.
@@ -169,6 +304,15 @@ customPolicyAgent:
   logging:
     level: "info"
     format: "json"
+=======
+  # Keycloak client_credentials for outbound FC API calls
+  oauth:
+    clientID: "dcs-fc-client"
+    clientSecret: ""
+    clientSecretSecretRef:
+      name: ""
+      key: "FEDERATED_CATALOGUE_CLIENT_SECRET"
+>>>>>>> klaas/ui_improvements
   resources:
     requests:
       cpu: 100m
@@ -176,3 +320,120 @@ customPolicyAgent:
     limits:
       cpu: 500m
       memory: 1Gi
+
+# PDF-Core: C2PA-aware PDF compiler and verifier (DCS-OR-C2PA-*)
+pdfCore:
+  enabled: true
+  image:
+    repository: ""     # set to your registry image, e.g. registry.example.com/facis/pdf-core
+    tag: ""            # set to the image tag; falls back to .Chart.AppVersion
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  service:
+    port: 8080
+  # url overrides the auto-wired ClusterIP URL when enabled=true.
+  url: ""
+  # contextIRI overrides the JSON-LD @context IRI embedded in every envelope.
+  # Default: auto-derived as <pdfCoreURL>/ontology/dcs-pdf-core.
+  # Set to a registered w3id IRI once available.
+  contextIRI: ""
+  # ontologyBaseURL is the base URL pdf-core uses for ontology IRIs in payloads
+  # and the served JSON-LD context (DCS_PDF_CORE_ONTOLOGY_BASE_URL, required by
+  # pdf-core at startup). Default: auto-derived from the pdf-core service URL,
+  # keeping it consistent with the contextIRI default above.
+  ontologyBaseURL: ""
+  signing:
+    # No default key/cert ships in this chart (clean-product sweep freeze-day
+    # grep gate: no PEM private key material in committed values files). This
+    # path only matters when pkcs11.provisioning.enabled=false (SoftHSM2/PKCS#11
+    # provisioning is the default and does not use these values at all — see
+    # pdf-core-signing-secret.yaml's render guard). If you disable PKCS11
+    # provisioning, either set existingSecret below, or supply signerKeyPEM +
+    # x5ChainPEM explicitly via --set-file / a values overlay that is NOT
+    # committed to the chart.
+    signerKeyPEM: ""
+    x5ChainPEM: ""
+    # Set to use an existing Secret instead of auto-creating one from the inline values above.
+    existingSecret: ""
+    existingSecretSignerKeyKey: "signer-key-pem"
+    existingSecretX5ChainKey: "x5chain-pem"
+
+ipfs:
+  enabled: false
+  tenantBaseURL: ""
+  mfsBaseURL: ""
+  tenantBaseURLSecretRef:
+    name: ""
+    key: "IPFS_TENANT_BASE_URL"
+  mfsBaseURLSecretRef:
+    name: ""
+    key: "IPFS_MFS_BASE_URL"
+
+ipfsDocumentManager:
+  enabled: false
+
+# IPFS Document Manager client – auto-wired when sub-charts are enabled
+ipfsClient:
+  tenantName: "tenant_space"  # tenant identifier in the Document Manager URL path
+  tenantBaseURL: ""            # IPFS_TENANT_BASE_URL explicit override
+  mfsBaseURL: ""               # IPFS_MFS_BASE_URL explicit override (Kubo RPC API)
+
+# ---- Optional monitoring stack (Prometheus, Grafana, Alertmanager) ----------------
+monitoring:
+  enabled: false
+
+grafana:
+  enabled: false
+  adminPassword: YourStrongPassword
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 5Gi
+
+prometheus:
+  enabled: false
+  prometheusSpec:
+    retention: 15d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+    serviceMonitorSelectorNilUsesHelmValues: true
+    podMonitorSelectorNilUsesHelmValues: true
+
+alertmanager:
+  enabled: false
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+
+nodeExporter:
+  enabled: false
+
+kubeStateMetrics:
+  enabled: false
+
+# EU DSS demonstration webapp (AdES validation alongside the PKCS#11 signing
+# path — DCS-FR-SM-18, DCS-IR-SI-10, DCS-IR-CI-08). DISABLED by default:
+# there is no official EU-published container image (the webapp ships as a
+# ZIP/WAR), so charts/dss wraps a pinned community image; enabling it — and
+# setting the backend's DSS_URL env (e.g. http://<release>-dss:8080) — is an
+# explicit operator decision. The backend HARD-FAILS signature validation if
+# DSS_URL is configured but the instance is unreachable.
+# EU DSS for signature VALIDATION (DCS-FR-SM-18) and the wallet-driven
+# /signature/submit acceptance path (ADR-12). When enabled the backend gets
+# DSS_URL; the DCS validates a signature the SIGNATORY produced and holds no
+# contract-signing key. Disabled by default (an operator decision).
+dss:
+  enabled: false
+  # url: http://<release>-dss:8080  # defaults to the in-cluster dss service

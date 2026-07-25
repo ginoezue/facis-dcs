@@ -80,7 +80,6 @@ Our use case focuses on:
 Fields:
 
 - `did`
-- `documentNumber`
 - `version`
 - `participantId`
 - ...

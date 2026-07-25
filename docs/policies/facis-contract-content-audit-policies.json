@@ -1,0 +1,6 @@
+{
+  "policySetId": "facis.dcs.contract.structure-semantics",
+  "version": "v1",
+  "enforceCanonicalShapes": true,
+  "enforceValidationProfile": true
+}

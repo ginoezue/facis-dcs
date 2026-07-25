@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import type { ContractNegotiationTask } from '@/models/contract/contract-negotiation-task'
+import { computed, onUnmounted, type Ref, ref } from 'vue'
 import { ROUTES } from '@/router/router'
 import { useContractsStore } from '@/stores/contracts-store'
 import { useNegotiationTaskStateFilterStore } from '@/stores/state-filter-store'
+import { ContractState } from '@/types/contract-state'
 import { negotiationTaskStates } from '@/types/negotiation-task-state'
 import { compareValues } from '@/utils/comparison'
-import { computed, onUnmounted, ref, type Ref } from 'vue'
+import TaskListSearch from './TaskListSearch.vue'
 import ListSort from '../ListSort.vue'
 import ListStateFilter from '../ListStateFilter.vue'
-import TaskListSearch from './TaskListSearch.vue'
+import type { ContractNegotiationTask } from '@/models/contract/contract-negotiation-task'
 
 const props = defineProps<{
   tasks: ContractNegotiationTask[]
@@ -45,11 +46,16 @@ const filteredTasks = computed(() => {
   if (stateFilterStore.hasFilters) {
     return sortedTasks.value.filter((task) => stateFilterStore.hasFilter(task.state))
   }
-  return sortedTasks.value
+  return sortedTasks.value.filter((task) => {
+    const contractState = contractsStore.findContractByDid(task.did)?.state
+    return (
+      contractState && ([ContractState.draft, ContractState.negotiation] as ContractState[]).includes(contractState)
+    )
+  })
 })
 
 const getContractName = (task: ContractNegotiationTask) => {
-  return contractsStore.contracts.find((contract) => contract.did === task.did)?.name ?? 'Nameless Contract'
+  return contractsStore.findContractByDid(task.did)?.name ?? 'Nameless Contract'
 }
 
 const applySearchResult = (searchResult: ContractNegotiationTask[]) => {
@@ -57,50 +63,63 @@ const applySearchResult = (searchResult: ContractNegotiationTask[]) => {
   searchedTasks.value = searchResult
 }
 
-const resolveViewRouteName = () => ROUTES.CONTRACTS.NEGOTIATE
+const resolveViewRouteName = (task: ContractNegotiationTask) => {
+  const currentState = contractsStore.findContractByDid(task.did)?.state
+  if (currentState === ContractState.negotiation) {
+    return ROUTES.CONTRACTS.NEGOTIATE
+  }
+  return ROUTES.CONTRACTS.VIEW
+}
 
 onUnmounted(() => stateFilterStore.reset())
 </script>
 
 <template>
-  <ul class="list">
-    <li class="tracking-wide w-full px-4 flex justify-end flex-col sm:flex-row">
-      <TaskListSearch class="flex-1" :tasks="tasks" placeholder="Search contracts" @search-result="applySearchResult" />
-      <ListStateFilter
-        label="Negotiation Task"
-        :filters="negotiationTaskStates"
-        store-type="negotiationTasks"
-        :disabled="!hasTasks"
-      />
-      <ListSort :sorter="sorter" v-model:sort-by="sortBy" v-model:sort-order="sortOrder" :disabled="!hasTasks" />
-    </li>
-    <template v-if="filteredTasks.length > 0">
-      <li v-for="task in filteredTasks" :key="task.did" class="list-row">
-        <div class="list-col-grow card bg-base-100 card-border hover:bg-base-300 border-base-content/10">
-          <div class="card-body">
-            <h2 class="card-title flex-wrap justify-between">
-              <div>Negotiation Task for Contract: {{ getContractName(task) }}</div>
-              <div class="flex-1"></div>
-              <div class="badge badge-secondary">{{ task.state }}</div>
-            </h2>
-            <div class="flex justify-between">
-              <div v-if="task.contract_version">Version: {{ task.contract_version }}</div>
-            </div>
-            <div class="flex justify-between">
-              <div>Creation date: {{ new Date(task.created_at).toLocaleDateString() }}</div>
-              <div class="card-actions justify-end">
-                <RouterLink
-                  :to="{ name: resolveViewRouteName(), params: { did: task.did } }"
-                  class="btn btn-sm btn-primary"
-                >
-                  View
-                </RouterLink>
+  <div class="flex h-full min-h-0 flex-col">
+    <ul class="list flex-1 overflow-y-auto">
+      <li class="flex w-full flex-col justify-end px-4 tracking-wide sm:flex-row">
+        <TaskListSearch
+          class="flex-1"
+          :tasks="tasks"
+          placeholder="Search contracts"
+          @search-result="applySearchResult"
+        />
+        <ListStateFilter
+          label="Negotiation Task"
+          :filters="negotiationTaskStates"
+          store-type="negotiationTasks"
+          :disabled="!hasTasks"
+        />
+        <ListSort v-model:sort-by="sortBy" v-model:sort-order="sortOrder" :sorter="sorter" :disabled="!hasTasks" />
+      </li>
+      <template v-if="filteredTasks.length > 0">
+        <li v-for="task in filteredTasks" :key="task.did" class="list-row">
+          <div class="list-col-grow card border-base-content/10 bg-base-100 card-border hover:bg-base-300">
+            <div class="card-body">
+              <h2 class="card-title flex-wrap justify-between">
+                <div>Contract Name: {{ getContractName(task) }}</div>
+                <div class="flex-1"></div>
+                <div class="badge badge-secondary">{{ task.state }}</div>
+              </h2>
+              <div class="flex justify-between">
+                <div v-if="task.contract_version">Version: {{ task.contract_version }}</div>
+              </div>
+              <div class="flex justify-between">
+                <div>Creation date: {{ new Date(task.created_at).toLocaleDateString() }}</div>
+                <div class="card-actions justify-end">
+                  <RouterLink
+                    :to="{ name: resolveViewRouteName(task), params: { did: task.did } }"
+                    class="btn btn-sm btn-primary"
+                  >
+                    View
+                  </RouterLink>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      </li>
-    </template>
-    <li v-else class="px-4">No negotiation tasks found.</li>
-  </ul>
+        </li>
+      </template>
+      <li v-else class="px-4">No negotiation tasks found.</li>
+    </ul>
+  </div>
 </template>

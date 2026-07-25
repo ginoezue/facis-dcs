@@ -1,4 +1,4 @@
-@UC-02-10
+@UC-02-10 @REQ-remove-free-template-state-selection-AC5
 Feature: Template Approval Workflow
   Templates progress through submission, review, and approval
   before becoming available for contract generation.
@@ -80,7 +80,7 @@ Feature: Template Approval Workflow
   @clean_db
   Scenario: Archive approved template
     Given I am authenticated with roles: "Template Manager"
-    And template "Standard NDA" is in "Approved" status
+    And template "Standard NDA" is in "Registered" status
     When I delete template "Standard NDA"
     Then the template status is "Deprecated"
 

@@ -1,106 +1,10 @@
-<template>
-  <div class="space-y-4">
-    <!-- tool bar -->
-    <div class="rounded-lg border border-base-300 bg-base-100 p-4 shadow-sm">
-      <p class="text-sm font-medium text-base-content mb-1">Comparing changes</p>
-      <p class="text-xs text-base-content/50 mb-3"> Choose two versions to see what's changed. </p>
-      <div class="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <label class="form-control w-full md:flex-1">
-          <span class="label-text text-xs text-base-content/70">Left</span>
-          <select
-            v-model="leftPick"
-            class="select select-bordered select-sm w-full"
-            :disabled="loading || compareOptions.length < 2"
-          >
-            <option
-              v-for="opt in compareOptions"
-              :key="`L-${opt.id}`"
-              :value="opt.id"
-              :disabled="opt.id === rightPick"
-            >
-              {{ opt.label }}
-            </option>
-          </select>
-        </label>
-        <label class="form-control w-full md:flex-1">
-          <span class="label-text text-xs text-base-content/70">Right</span>
-          <select
-            v-model="rightPick"
-            class="select select-bordered select-sm w-full"
-            :disabled="loading || compareOptions.length < 2"
-          >
-            <option
-              v-for="opt in compareOptions"
-              :key="`R-${opt.id}`"
-              :value="opt.id"
-              :disabled="opt.id === leftPick"
-            >
-              {{ opt.label }}
-            </option>
-          </select>
-        </label>
-      </div>
-
-      <div class="mt-4 flex flex-wrap items-center gap-6 border-t border-base-300 pt-4">
-        <label
-          for="contract-diff-line-numbers"
-          class="flex cursor-pointer items-center gap-3 text-sm text-base-content/80"
-        >
-          <span class="select-none">Line numbers</span>
-          <input
-            id="contract-diff-line-numbers"
-            v-model="showLineNumbers"
-            type="checkbox"
-            class="checkbox mt-1"
-          />
-        </label>
-        <label
-          for="contract-diff-highlight"
-          class="flex cursor-pointer items-center gap-3 text-sm text-base-content/80"
-        >
-          <span class="select-none">Highlight changes</span>
-          <input
-            id="contract-diff-highlight"
-            v-model="highlightDiff"
-            type="checkbox"
-            class="checkbox mt-1"
-          />
-        </label>
-      </div>
-
-      <p
-        v-if="loading"
-        class="mt-3 text-sm text-base-content/60"
-      >Loading history…</p>
-      <p
-        v-else-if="loadError"
-        class="mt-3 text-sm text-error"
-      >{{ loadError }}</p>
-      <p
-        v-else-if="compareOptions.length < 2"
-        class="mt-3 text-sm text-base-content/60"
-      >
-        Add at least one saved history entry to compare versions.
-      </p>
-    </div>
-
-    <DiffView
-      :leftContractData="leftContractData"
-      :rightContractData="rightContractData"
-      :show-line-numbers="showLineNumbers"
-      :highlight-diff="highlightDiff"
-    />
-  </div>
-</template>
-
 <script setup lang="ts">
-import type { ContractData } from '@/models/contract-data'
-import type { ContractHistoryItem } from '@/models/responses/contract-response'
-import { useContractDataPreprocess } from '@/modules/contract-workflow-engine/composables/useContractDataPreprocess'
-import DiffView from '@/modules/contract-workflow-engine/components/DiffView.vue'
+import { computed, ref, watch } from 'vue'
+import DiffView from '@contract-workflow-engine/components/DiffView.vue'
 import { contractWorkflowService } from '@/services/contract-workflow-service'
 import { ContractState, type ContractState as ContractStateType } from '@/types/contract-state'
-import { computed, ref, watch } from 'vue'
+import type { ContractData } from '@/models/contract-data'
+import type { ContractHistoryItem } from '@/models/responses/contract-response'
 
 const DRAFT_ID = 'draft'
 
@@ -110,8 +14,6 @@ const props = defineProps<{
   currentContractData?: ContractData
 }>()
 
-const { preprocessContractData } = useContractDataPreprocess()
-
 const loading = ref(false)
 const loadError = ref('')
 const historyItems = ref<ContractHistoryItem[]>([])
@@ -120,7 +22,7 @@ const rightPick = ref(DRAFT_ID)
 const showLineNumbers = ref(true)
 const highlightDiff = ref(true)
 
-type CompareOption = {
+interface CompareOption {
   id: string
   label: string
   kind: 'draft' | 'history'
@@ -181,30 +83,22 @@ function formatDateTime(iso?: string): string {
 
   const pad = (value: number) => String(value).padStart(2, '0')
 
-  return [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate()),
-  ].join('-') + ' ' + [
-    pad(date.getHours()),
-    pad(date.getMinutes()),
-    pad(date.getSeconds()),
-  ].join(':')
+  return (
+    [date.getFullYear(), pad(date.getMonth() + 1), pad(date.getDate())].join('-') +
+    ' ' +
+    [pad(date.getHours()), pad(date.getMinutes()), pad(date.getSeconds())].join(':')
+  )
 }
 
 function formatHistoryOptionLabel(item: ContractHistoryItem): string {
   const when = formatDateTime(item.updated_at)
-  return when
-      ? `${when} (version ${item.contract_version})`
-      : `(version ${item.contract_version})`
+  return when ? `${when} (version ${item.contract_version})` : `(version ${item.contract_version})`
 }
 
 function resolveData(id: string): ContractData | undefined {
   if (id === DRAFT_ID) return props.currentContractData
   const row = sortedHistory.value.find((item) => historyOptionId(item) === id)
-  const raw = row?.contract_data
-  if (!raw) return undefined
-  return preprocessContractData(raw as ContractData)
+  return row?.contract_data
 }
 
 const leftContractData = computed((): ContractData | undefined => resolveData(leftPick.value))
@@ -252,15 +146,13 @@ function normalizePicksAfterHistoryChange() {
   const optionIds = new Set(opts.map((o) => o.id))
 
   if (opts.length < 2) {
-    leftPick.value = opts[0]?.id ?? DRAFT_ID 
+    leftPick.value = opts[0]?.id ?? DRAFT_ID
     rightPick.value = opts[0]?.id ?? DRAFT_ID
     return
   }
 
   const picksValid =
-    optionIds.has(leftPick.value) &&
-    optionIds.has(rightPick.value) &&
-    leftPick.value !== rightPick.value
+    optionIds.has(leftPick.value) && optionIds.has(rightPick.value) && leftPick.value !== rightPick.value
 
   if (!picksValid) {
     const draft = opts.find((o) => o.id === DRAFT_ID)
@@ -284,3 +176,69 @@ watch([historyItems, showCurrentDraft], () => normalizePicksAfterHistoryChange()
 
 watch([leftPick, rightPick], () => ensureDistinctPicks())
 </script>
+
+<template>
+  <div class="space-y-4">
+    <!-- tool bar -->
+    <div class="rounded-lg border border-base-300 bg-base-100 p-4 shadow-sm">
+      <p class="mb-1 text-sm font-medium text-base-content">Comparing changes</p>
+      <p class="mb-3 text-xs text-base-content/70">Choose two versions to see what's changed.</p>
+      <div class="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <label class="form-control w-full md:flex-1">
+          <span class="label-text text-xs text-base-content/70">Left</span>
+          <select
+            v-model="leftPick"
+            class="select-bordered select w-full select-sm"
+            :disabled="loading || compareOptions.length < 2"
+          >
+            <option v-for="opt in compareOptions" :key="`L-${opt.id}`" :value="opt.id" :disabled="opt.id === rightPick">
+              {{ opt.label }}
+            </option>
+          </select>
+        </label>
+        <label class="form-control w-full md:flex-1">
+          <span class="label-text text-xs text-base-content/70">Right</span>
+          <select
+            v-model="rightPick"
+            class="select-bordered select w-full select-sm"
+            :disabled="loading || compareOptions.length < 2"
+          >
+            <option v-for="opt in compareOptions" :key="`R-${opt.id}`" :value="opt.id" :disabled="opt.id === leftPick">
+              {{ opt.label }}
+            </option>
+          </select>
+        </label>
+      </div>
+
+      <div class="mt-4 flex flex-wrap items-center gap-6 border-t border-base-300 pt-4">
+        <label
+          for="contract-diff-line-numbers"
+          class="flex cursor-pointer items-center gap-3 text-sm text-base-content/80"
+        >
+          <span class="select-none">Line numbers</span>
+          <input id="contract-diff-line-numbers" v-model="showLineNumbers" type="checkbox" class="checkbox mt-1" />
+        </label>
+        <label
+          for="contract-diff-highlight"
+          class="flex cursor-pointer items-center gap-3 text-sm text-base-content/80"
+        >
+          <span class="select-none">Highlight changes</span>
+          <input id="contract-diff-highlight" v-model="highlightDiff" type="checkbox" class="checkbox mt-1" />
+        </label>
+      </div>
+
+      <p v-if="loading" class="mt-3 text-sm text-base-content/70">Loading history…</p>
+      <p v-else-if="loadError" class="mt-3 text-sm text-error">{{ loadError }}</p>
+      <p v-else-if="compareOptions.length < 2" class="mt-3 text-sm text-base-content/70">
+        Add at least one saved history entry to compare versions.
+      </p>
+    </div>
+
+    <DiffView
+      :left-contract-data="leftContractData"
+      :right-contract-data="rightContractData"
+      :show-line-numbers="showLineNumbers"
+      :highlight-diff="highlightDiff"
+    />
+  </div>
+</template>

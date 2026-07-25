@@ -2,13 +2,14 @@ package pg
 
 import (
 	"context"
-	"digital-contracting-service/internal/templaterepository/db"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
+
+	"digital-contracting-service/internal/templaterepository/db"
 )
 
 type PostgresReviewTaskRepo struct {
@@ -61,20 +62,6 @@ func (r *PostgresReviewTaskRepo) ReopenTasks(ctx context.Context, tx *sqlx.Tx, d
     `
 	_, err := tx.ExecContext(ctx, statement, did)
 	return err
-}
-
-func (r *PostgresReviewTaskRepo) ReadAll(ctx context.Context, tx *sqlx.Tx, did string) ([]db.ReviewTaskData, error) {
-	query := `
-        SELECT id, did, state, reviewer,
-               created_by, created_at
-        FROM contract_templates_review_task WHERE did = $1
-    `
-	var reviewTasks []db.ReviewTaskData
-	err := tx.SelectContext(ctx, &reviewTasks, query, did)
-	if err != nil {
-		return nil, err
-	}
-	return reviewTasks, nil
 }
 
 func (r *PostgresReviewTaskRepo) ReadAllByDID(ctx context.Context, tx *sqlx.Tx, did string) ([]db.ReviewTaskData, error) {

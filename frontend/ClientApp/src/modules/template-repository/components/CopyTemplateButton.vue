@@ -1,12 +1,12 @@
 <script setup lang="ts">
+import { useRouter } from 'vue-router'
+import { useTemplatePermissions } from '@template-repository/composables/useTemplatePermissions'
+import { useDcsDraftStore } from '@template-repository/store/dcsDraftStore'
 import { ROUTES } from '@/router/router'
 import { contractTemplateService } from '@/services/contract-template-service'
-import { useRouter } from 'vue-router'
-import { useTemplateDraftStore } from '../store/templateDraftStore'
-import { useTemplatePermissions } from '../composables/useTemplatePermissions'
 
 const router = useRouter()
-const draftStore = useTemplateDraftStore()
+const draftStore = useDcsDraftStore()
 
 const { isCreator, isManager } = useTemplatePermissions()
 
@@ -15,7 +15,7 @@ const copyTemplate = async () => {
 
   const response = await contractTemplateService.copy({ did: draftStore.did })
   if (response.did) {
-    router.push({ name: ROUTES.TEMPLATES.EDIT, params: { did: response.did } })
+    await router.push({ name: ROUTES.TEMPLATES.EDIT, params: { did: response.did } })
   }
 }
 </script>

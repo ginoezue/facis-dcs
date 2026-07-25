@@ -1,7 +1,9 @@
-import type { ContractTemplateState } from '@/types/contract-template-state'
 import type { ContractTemplateData } from './contract-template'
-import type { ContractTemplateActionFlag } from '@/types/contract-template-action-flag'
+import type { ContractTemplateResponsible } from './contract-template-responsible'
 import type { ComponentType } from '@/types/component-type'
+import type { ContractTemplateActionFlag } from '@/types/contract-template-action-flag'
+import type { ContractTemplateState } from '@/types/contract-template-state'
+import type { UserRole } from '@/types/user-role'
 
 export interface ContractTemplateCreateEvent {
   did: string
@@ -11,6 +13,8 @@ export interface ContractTemplateCreateEvent {
   description: string
   template_data: ContractTemplateData
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateCopyEvent {
@@ -18,11 +22,12 @@ export interface ContractTemplateCopyEvent {
   new_did: string
   copied_by: string
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateSubmitEvent {
   did: string
-  document_number?: string
   version: number
   previous_state: ContractTemplateState
   new_state: ContractTemplateState
@@ -30,39 +35,43 @@ export interface ContractTemplateSubmitEvent {
   action_flag: ContractTemplateActionFlag
   comments?: string[]
   occurred_at: string
+  responsible?: ContractTemplateResponsible
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateApproveEvent {
   did: string
-  document_number?: string
   version: number
   approved_by: string
   decision_notes?: string[]
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateRejectEvent {
   did: string
-  document_number?: string
   version: string
   rejected_by: string
   reason: string
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateVerifyEvent {
   did: string
-  document_number?: string
   version: number
   verified_by: string
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateUpdateEvent {
   did: string
-  updated_at: string
-  old_document_number?: string
-  new_document_number?: string
+  updated_by: string
   old_name?: string
   new_name?: string
   old_description?: string
@@ -70,15 +79,13 @@ export interface ContractTemplateUpdateEvent {
   old_template_data?: ContractTemplateData
   new_template_data?: ContractTemplateData
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateUpdateManageEvent {
   did: string
   updated_at: string
-  old_document_number?: string
-  new_document_number?: string
-  old_state?: ContractTemplateState
-  new_state?: ContractTemplateState
   old_name?: string
   new_name?: string
   old_description?: string
@@ -86,42 +93,63 @@ export interface ContractTemplateUpdateManageEvent {
   old_template_data?: ContractTemplateData
   new_template_data?: ContractTemplateData
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateSearchEvent {
   retrieved_by: string
-  document_number?: string
-  version: number
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateRetrieveAllEvent {
   retrieved_by: string
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateRetrieveByIDEvent {
   did: string
-  document_number?: string
   version: number
   retrieved_by: string
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateArchiveEvent {
   did: string
-  document_number?: string
   version: number
   archived_by: string
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateRegisterEvent {
   did: string
-  document_number?: string
-  version: number
   registered_by: string
+  updated_at: string
+  name?: string
+  description?: string
+  template_data?: ContractTemplateData
+  source_did: string
+  source_version: number
   occurred_at: string
+  holder_did: string
+  user_roles: UserRole[]
+}
+
+export interface ContractTemplatePublishEvent {
+  did: string
+  version: number
+  published_by: string
+  holder_did: string
+  occurred_at: string
+  user_roles: UserRole[]
 }
 
 export interface ContractTemplateAuditEvent {
@@ -129,6 +157,8 @@ export interface ContractTemplateAuditEvent {
   audited_by: string
   occurred_at: string
   component_type: ComponentType
+  holder_did: string
+  user_roles: UserRole[]
 }
 
 export type ContractTemplateEvent =
@@ -144,4 +174,5 @@ export type ContractTemplateEvent =
   | ContractTemplateRetrieveByIDEvent
   | ContractTemplateArchiveEvent
   | ContractTemplateRegisterEvent
+  | ContractTemplatePublishEvent
   | ContractTemplateAuditEvent
