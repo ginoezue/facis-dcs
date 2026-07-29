@@ -195,9 +195,8 @@ orce:
 
 signing:
   # Shared with instance A: same RFC 3161 TSA, so both instances' C2PA/PAdES
-  # timestamps agree on trust. Wired as TSA_URL (backend) and
-  # DCS_PDF_CORE_TSA_URL (this release's own pdf-core); fatal on startup if
-  # empty.
+  # timestamps agree on trust. Wired as TSA_URL (backend); fatal on startup
+  # if empty.
   tsaURL: "http://dcs-orce:1880/tsa/"
   # Shares instance A's in-cluster dev TSA - trust the same provisioned cert.
   tsaTrustCertSecret: "dcs-orce-tsa-material"

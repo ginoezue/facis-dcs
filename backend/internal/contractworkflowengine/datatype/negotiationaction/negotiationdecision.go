@@ -35,7 +35,7 @@ func NewNegotiationDecision(s string) (NegotiationDecision, error) {
 	return ts, nil
 }
 
-// IsValid checks if the NegotiationDecision is a valid role
+// IsValid reports whether the value is one of the declared NegotiationDecision values.
 func (s NegotiationDecision) IsValid() bool {
 	upper := NegotiationDecision(strings.ToUpper(string(s)))
 	return validState[upper]

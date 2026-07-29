@@ -260,16 +260,8 @@ export function isDcsSection(block: DcsBlock): block is DcsSection {
   return block['@type'] === 'dcs:Section'
 }
 
-export function isDcsTextBlock(block: DcsBlock): block is DcsTextBlock {
-  return block['@type'] === 'dcs:TextBlock'
-}
-
 export function isDcsClause(block: DcsBlock): block is DcsClause {
   return block['@type'] === 'dcs:Clause'
-}
-
-export function isDcsContractFieldRef(seg: DcsContentSegment): seg is DcsContractFieldRef {
-  return typeof seg !== 'string'
 }
 
 export function isDcsDocumentData(raw: unknown): raw is DcsDocumentData {
@@ -296,8 +288,4 @@ function isOdrlSet(value: unknown): value is OdrlSet {
 
 export function isDcsTemplateData(raw: unknown): raw is DcsTemplateData {
   return isDcsDocumentData(raw) && raw['@type'] === 'dcs:ContractTemplate'
-}
-
-export function isDcsContractData(raw: unknown): raw is DcsContractData {
-  return isDcsDocumentData(raw) && raw['@type'] === 'dcs:Contract'
 }

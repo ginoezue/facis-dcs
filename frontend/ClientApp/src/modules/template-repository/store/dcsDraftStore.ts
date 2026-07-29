@@ -613,11 +613,6 @@ export function flattenPolicySet(policies: OdrlSet | OdrlRule[] | undefined): Od
   ]
 }
 
-export function blockIdFromIri(iri: string): string {
-  const local = iri.includes('#') ? iri.slice(iri.lastIndexOf('#') + 1) : iri.slice(UUID_URN_PREFIX.length)
-  return decodeURIComponent(local.replace(/^block-/, ''))
-}
-
 // ---- Document assembly (trivial — blocks/layout already in JSON-LD) ----
 
 interface CanonicalDocumentInput {

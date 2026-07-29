@@ -157,8 +157,6 @@ func openHSMWithRetry(ctx context.Context) *hsm.HSM {
 }
 
 func main() {
-	// Define command line flags, add any other flag required to configure the
-	// service.
 	var (
 		hostF     = flag.String("host", "local", "Server host (valid values: local)")
 		domainF   = flag.String("domain", "", "Host domain name (overrides host domain specified in service design)")
@@ -187,7 +185,6 @@ func main() {
 		}
 	}
 
-	// Setup logger. Replace logger with your own log package of choice.
 	format := log.FormatJSON
 	if log.IsTerminal() {
 		format = log.FormatTerminal
@@ -781,8 +778,6 @@ func main() {
 		}
 	}()
 
-	// Wrap the service in endpoints that can be invoked from other service
-	// potentially running in different processes.
 	var (
 		authEndpoints                         *genauth.Endpoints
 		contractStorageArchiveEndpoints       *contractstoragearchive.Endpoints
@@ -841,8 +836,7 @@ func main() {
 		keyInventoryEndpoints.Use(log.Endpoint)
 	}
 
-	// Setup interrupt handler. This optional step configures the process so
-	// that SIGINT and SIGTERM signals cause the service to stop gracefully.
+	// SIGINT/SIGTERM stop the service gracefully.
 	go func() {
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)

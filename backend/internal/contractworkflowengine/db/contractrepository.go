@@ -26,24 +26,6 @@ type Responsible struct {
 	Counterparty string `json:"counterparty"`
 }
 
-func ToResponsible(raw any) (*Responsible, error) {
-	if raw == nil {
-		return nil, nil
-	}
-
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return nil, fmt.Errorf("marshal responsible: %w", err)
-	}
-
-	var r Responsible
-	if err := json.Unmarshal(data, &r); err != nil {
-		return nil, fmt.Errorf("unmarshal responsible: %w", err)
-	}
-
-	return &r, nil
-}
-
 func (r *Responsible) Value() (driver.Value, error) {
 	return json.Marshal(r)
 }

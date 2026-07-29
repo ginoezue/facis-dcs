@@ -198,9 +198,8 @@ def _orce_synthetic_peer_did() -> str:
 
     A BARE AUTHORITY, deliberately: the flow serves this identity at the host
     root and distinguishes it from the AC5 mismatch identity by Host header,
-    not by path. It previously carried a ":synthetic-peer" segment, which only
-    resolved because did:web resolution discarded path segments — with
-    resolution following the spec, that segment would point every lookup
+    not by path. A path segment (e.g. ":synthetic-peer") must not be added —
+    under spec-conform did:web resolution it would point every lookup
     (did.json, agreement credential, and the peer API the synchronizer ships
     to) at paths this fixture does not serve."""
     return os.getenv("BDD_TRUST_PDP_SYNTHETIC_PEER_DID", "did:web:dcs-orce%3A1880")
@@ -1246,10 +1245,11 @@ def step_then_schema_ref_resolves_against_a(context):
     """Phase 4 (DCS-to-DCS): the sh:shapesGraph anchor is set once, at
     production time on instance A, and synced verbatim — it never gets
     re-anchored to instance B's own hub. This confirms it's still resolvable
-    from outside instance A (the reachability precondition
-    validation.VerifyAgainstOriginatorHub, called from post_sync, depends
-    on): host-relative anchors (no DCS_PUBLIC_URL configured, the BDD
-    default) are resolved against instance A's origin, never instance B's."""
+    from outside instance A — the reachability precondition any peer-side
+    revalidation against the originator's hub (validation.
+    VerifyAgainstOriginatorHub) depends on: host-relative anchors (no
+    DCS_PUBLIC_URL configured, the BDD default) are resolved against
+    instance A's origin, never instance B's."""
     c_did = context.cross_instance_contract_did
     manager_h = AuthService.get_headers_for_roles(["Contract Manager"], api_base=context.base_url_b)
     retrieve = _requests.get(

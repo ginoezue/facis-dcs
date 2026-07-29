@@ -47,8 +47,8 @@ func ExtractPageContentByteRanges(pdf []byte) ([][2]int, error) {
 // embedded C2PA manifest (/Subtype /application#2Fc2pa). The manifest's
 // binary JUMBF payload can incidentally contain the bytes "BT", which would
 // otherwise misclassify the manifest stream as page content and make it
-// "overlap" its own exclusion window exactly (seen as an intermittent
-// compiler-invariant panic in /sign under real load).
+// "overlap" its own exclusion window exactly, tripping the coverage
+// invariant check.
 func isC2PAManifestDict(search []byte, streamIdx int) bool {
 	dictStart := 0
 	if objIdx := bytes.LastIndex(search[:streamIdx], []byte(" obj")); objIdx >= 0 {

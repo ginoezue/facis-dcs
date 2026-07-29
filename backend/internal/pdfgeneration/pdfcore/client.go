@@ -268,10 +268,10 @@ func (c *Client) Reanchor(ctx context.Context, pdf []byte, manifestURL string) (
 }
 
 // EmbedEvidence posts pdf + evidence to POST /evidence/embed and returns the
-// PDF with the evidence attached but NOT signed — the attach-only step a remote
-// DSS signer performs before it produces the PAdES signature (so the /ByteRange
-// covers the evidence). The default pdf-core signer embeds and signs in one
-// call (Sign); this seam splits the two for the DSS backend.
+// PDF with the evidence attached but NOT signed — the attach-only step before
+// an external PAdES signer (wallet/QTSP/DSS) produces the signature, so the
+// signature's /ByteRange covers the evidence (embed-first-sign-second,
+// DCS-FR-SM-08). pdf-core holds no key and never signs.
 func (c *Client) EmbedEvidence(ctx context.Context, pdf, evidence []byte) (embedded []byte, err error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)

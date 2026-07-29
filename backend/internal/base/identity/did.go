@@ -267,12 +267,12 @@ func (d *DIDDocument) Verify(content []byte, signature []byte) error {
 //  1. Chain validation leaf -> intermediates -> root. trustedRoots
 //     determines the trust anchor; nil means the system trust store.
 //  2. The leaf certificate must match the hostname of the DID.
-//  3. The public key of the leaf must match the JWK (n/e).
+//  3. The public key of the leaf must match the JWK (x/y).
 //  4. The leaf must carry the eIDAS QcCompliance statement.
 //
 // Note: QCStatements are a self-declaration by the issuer. For a legally
 // binding eIDAS validation, trustedRoots must be populated from the EU
-// Trusted Lists (LOTL/TSL), e.g. via BuildEUTrustPool.
+// Trusted Lists (LOTL/TSL), e.g. via EUTrustPool.Refresh.
 func (d *DIDDocument) VerifyEIDASCertificate(trustPool *EUTrustPool) error {
 
 	var trustedRoots *x509.CertPool

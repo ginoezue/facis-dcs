@@ -18,44 +18,6 @@ import (
 // identical to the current embedded one and no VC attachment is present.
 var ErrNoChanges = errors.New("no changes: payloads are semantically identical")
 
-// DiffNQuads returns the N-Quads present in newPayload but not oldPayload (added)
-// and those present in oldPayload but not newPayload (removed).
-func DiffNQuads(oldPayload, newPayload []byte) (added, removed []string, err error) {
-	oldNQuads, err := NormalizePayload(oldPayload)
-	if err != nil {
-		return nil, nil, fmt.Errorf("normalize old payload: %w", err)
-	}
-	newNQuads, err := NormalizePayload(newPayload)
-	if err != nil {
-		return nil, nil, fmt.Errorf("normalize new payload: %w", err)
-	}
-	oldSet := nquadsToSet(oldNQuads)
-	newSet := nquadsToSet(newNQuads)
-	for q := range newSet {
-		if !oldSet[q] {
-			added = append(added, q)
-		}
-	}
-	for q := range oldSet {
-		if !newSet[q] {
-			removed = append(removed, q)
-		}
-	}
-	sort.Strings(added)
-	sort.Strings(removed)
-	return added, removed, nil
-}
-
-func nquadsToSet(nquads []byte) map[string]bool {
-	set := make(map[string]bool)
-	for _, line := range strings.Split(string(nquads), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			set[line] = true
-		}
-	}
-	return set
-}
-
 var pdfTrailerSizeRE = regexp.MustCompile(`/Size (\d+)`)
 var pdfTrailerIDRE = regexp.MustCompile(`/ID\s*(\[[^\]]*\])`)
 var pdfTrailerRootRE = regexp.MustCompile(`/Root (\d+) 0 R`)
@@ -83,15 +45,15 @@ func currentRootObjID(pdf []byte) (int, bool) {
 	return id, true
 }
 
-// isPAdESSigned reports whether pdf already carries a PAdES signature: a
-// signature value dictionary (/Type /Sig) with a /ByteRange. A C2PA lifecycle
-// update over such a PDF must be provenance-only — re-rendering the pages or
-// re-stamping the AcroForm signature field would drop the signed field's /V and
-// invalidate the signature (DCS-OR-C2PA-010).
-// IsPAdESSigned reports whether pdf carries a PAdES signature. Exported for the
-// service layer's offline-tamper check on the plain re-render verify path.
+// IsPAdESSigned reports whether pdf carries a PAdES signature: a signature
+// value dictionary (/Type /Sig) with a /ByteRange. Exported for the service
+// layer's offline-tamper check on the plain re-render verify path.
 func IsPAdESSigned(pdf []byte) bool { return isPAdESSigned(pdf) }
 
+// isPAdESSigned: a C2PA lifecycle update over a signed PDF must be
+// provenance-only — re-rendering the pages or re-stamping the AcroForm
+// signature field would drop the signed field's /V and invalidate the
+// signature (DCS-OR-C2PA-010).
 func isPAdESSigned(pdf []byte) bool {
 	if !bytes.Contains(pdf, []byte("/ByteRange")) {
 		return false
@@ -214,8 +176,9 @@ func ExtractManifestStore(pdf []byte) ([]byte, error) {
 	return extractEmbeddedStreamByFileSpecName(pdf, "content_credential.c2pa")
 }
 
-// updatePDF is the shared implementation used by UpdatePDF and UpdatePDFWithVC.
-// The "no changes" guard is bypassed when vcBytes is non-nil.
+// updatePDF is the shared implementation behind all Update*/Reanchor entry
+// points. The "no changes" guard is bypassed when vcBytes is non-nil or the
+// call is a re-anchor.
 func updatePDF(ctx context.Context, oldPDF []byte, newPayload []byte, vcBytes []byte, remoteManifestURL string, compiledAt time.Time, reanchor bool) ([]byte, error) {
 	oldPayload, err := ExtractEmbeddedJSONLD(oldPDF)
 	if err != nil {
@@ -374,16 +337,6 @@ func updatePDF(ctx context.Context, oldPDF []byte, newPayload []byte, vcBytes []
 	return result, nil
 }
 
-// buildUpdateAppendixBytes constructs the raw bytes of the PDF incremental
-// update section. It supersedes:
-//   - obj 2  (Pages)        — updated /Kids list pointing to new page objects
-//   - obj 9  (C2PA manifest) — updated hard-binding hash and provenance chain
-//   - obj 11 (embedded JSON-LD) — replaced with the new payload, carried verbatim
-//
-// New objects (page content streams, page dictionaries, annotations) are
-// appended with IDs beyond the existing maximum so originals are unreachable
-// via the updated xref chain but their bytes remain intact for signature
-// verification.
 // catalogWithVCAssociated reads the document catalog (objID) from pdf and returns
 // its dictionary bytes with the lifecycle-VC filespec (vcSpecObjID) added to the
 // /AF array and the /EmbeddedFiles name tree, so the attached VC is a properly
@@ -415,6 +368,16 @@ var (
 	catalogEFRE = regexp.MustCompile(`(/EmbeddedFiles << /Names \[)([^\]]*)(\])`)
 )
 
+// buildUpdateAppendixBytes constructs the raw bytes of the PDF incremental
+// update section. It supersedes:
+//   - obj 2  (Pages)        — updated /Kids list pointing to new page objects
+//   - obj 9  (C2PA manifest) — updated hard-binding hash and provenance chain
+//   - obj 11 (embedded JSON-LD) — replaced with the new payload, carried verbatim
+//
+// New objects (page content streams, page dictionaries, annotations) are
+// appended with IDs beyond the existing maximum so originals are unreachable
+// via the updated xref chain but their bytes remain intact for signature
+// verification.
 func buildUpdateAppendixBytes(
 	baseLen, prevStartXref, oldSize int,
 	fileID string,
